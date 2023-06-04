@@ -1,0 +1,22 @@
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel Main
+
+// Create a RenderTexture with enableRandomWrite flag and set it
+// with cs.SetTexture
+RWTexture3D<float2> Volume;
+AppendStructuredBuffer<uint3> TestBuffer;
+
+float3 Center;
+float VoxelSize;
+int SizeInVoxels;
+
+[numthreads(8,8,8)]
+void Main (uint3 id : SV_DispatchThreadID)
+{
+    float3 center = (float3)(0.5);
+    float3 fx = ((float3)id+0.5) / SizeInVoxels;
+    float d = distance(center,fx);
+
+    Volume[id] = float2(0.9-d,0);
+    TestBuffer.Append(id);
+}
