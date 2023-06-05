@@ -34,6 +34,7 @@ public class IslandMain : MonoBehaviour
     }
 
     public ComputeBuffer SharedVertexBuffer { get; private set;  }
+    public ComputeBuffer SharedCellBuffer { get; private set;  }
 
 
     public class CountResolver : IDisposable
@@ -164,6 +165,7 @@ public class IslandMain : MonoBehaviour
         Destroy(SharedVertexIndexMapY);
         Destroy(SharedVertexIndexMapZ);
         SharedVertexBuffer.Dispose();
+        SharedCellBuffer.Dispose();
     }
 
     // Start is called before the first frame update
@@ -178,6 +180,9 @@ public class IslandMain : MonoBehaviour
 
         SharedVertexBuffer = new(Sector.TotalVoxelCount * 3, SharedVertex.SizeBytes, ComputeBufferType.Counter);
         SharedVertexBuffer.SetCounterValue(0);
+
+        SharedCellBuffer = new(Sector.TotalVoxelCount, 4, ComputeBufferType.Append);
+        SharedCellBuffer.SetCounterValue(0);
 
 
 
@@ -208,6 +213,7 @@ public class IslandMain : MonoBehaviour
         emitVertexes.SetFloat("VoxelSize", Sector.VoxelSize);
         emitVertexes.SetInt("SizeInVoxels", Sector.SizeInVoxels);
         emitVertexes.SetBuffer(kernel, "VertexOut", SharedVertexBuffer);
+        emitVertexes.SetBuffer(kernel, "CellOut", SharedCellBuffer);
         emitVertexes.SetTexture(kernel,"IndexOutMapX" , SharedVertexIndexMapX);
         emitVertexes.SetTexture(kernel,"IndexOutMapY" , SharedVertexIndexMapY);
         emitVertexes.SetTexture(kernel,"IndexOutMapZ" , SharedVertexIndexMapZ);
@@ -216,6 +222,7 @@ public class IslandMain : MonoBehaviour
 
         using CountResolver resolver = new();
         Debug.Log("Emitted vertexes: " + resolver.GetNow(SharedVertexBuffer));
+        Debug.Log("Emitted cells: " + resolver.GetNow(SharedCellBuffer));
 
 
 

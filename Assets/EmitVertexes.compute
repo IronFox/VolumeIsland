@@ -8,6 +8,7 @@ struct Vertex
     float3 normal;
 };
 RWStructuredBuffer<Vertex> VertexOut;
+AppendStructuredBuffer<uint3> CellOut;
 Texture3D<float2> Volume;
 float3 Origin;
 float VoxelSize;
@@ -21,18 +22,66 @@ RWTexture3D<uint> IndexOutMapZ;
 
 static const float iso = 0.5;
 
+groupshared float loaded[9][9][9];
+
 [numthreads(8,8,8)]
-void EmitVertex(uint3 id : SV_DispatchThreadID)
+void EmitVertex(uint3 id : SV_DispatchThreadID, uint3 localId : SV_GroupThreadID)
 {
+
+    loaded[localId.x][localId.y][localId.z] = Volume[id].x;
+    if (localId.x == 7)
+    {
+        loaded[8][localId.y][localId.z] = Volume[id + uint3(1, 0, 0)].x;
+        
+        if (localId.y == 7)
+        {
+            loaded[8][8][localId.z] = Volume[id + uint3(1, 1, 0)].x;
+
+            if (localId.z == 7)
+            {
+                loaded[8][8][8] = Volume[id + uint3(1, 1, 1)].x;
+            }
+        }
+    }
+    if (localId.y == 7)
+    {
+        loaded[localId.x][8][localId.z] = Volume[id + uint3(0, 1, 0)].x;
+
+        if (localId.z == 7)
+        {
+            loaded[localId.x][8][8] = Volume[id + uint3(0, 1, 1)].x;
+        }
+    }
+    if (localId.z == 7)
+    {
+        loaded[localId.x][localId.y][8] = Volume[id + uint3(0, 0, 1)].x;
+    }
+
+    AllMemoryBarrierWithGroupSync();
+
     if (any(id + 1 == SizeInVoxels))
         return;
 
 
 
-    float d = Volume[id].x;
-    float dx = Volume[id + uint3(1, 0, 0)].x;
-    float dy = Volume[id + uint3(0, 1, 0)].x;
-    float dz = Volume[id + uint3(0, 0, 1)].x;
+
+
+    float d = loaded[localId.x][localId.y][localId.z];
+    float dx = loaded[localId.x + 1][localId.y][localId.z];
+    float dy = loaded[localId.x][localId.y + 1][localId.z];
+    float dz = loaded[localId.x][localId.y][localId.z + 1];
+    
+    float da = loaded[localId.x + 1][localId.y + 1][localId.z];
+    float db = loaded[localId.x][localId.y + 1][localId.z + 1];
+    float dc = loaded[localId.x + 1][localId.y][localId.z + 1];
+    float dd = loaded[localId.x + 1][localId.y + 1][localId.z + 1];
+
+    bool4 d0 = float4(d, dx, dy, dz) >= iso;
+    bool4 d1 = float4(da, db, dc, dd) >= iso;
+
+    if ((any(d0) || any(d1)) && !(all(d0) && all(d1)))
+        CellOut.Append(id);
+
     float3 neighbors = float3(dx, dy, dz);
     float3 delta = neighbors - d;
     float3 x = (iso - d) / delta;
