@@ -4,13 +4,13 @@
 // Create a RenderTexture with enableRandomWrite flag and set it
 // with cs.SetTexture
 RWTexture3D<float2> Volume;
-AppendStructuredBuffer<uint3> TestBuffer;
+//AppendStructuredBuffer<uint3> TestBuffer;
 
-float3 Center;
+float3 Origin;
 float VoxelSize;
 int SizeInVoxels;
 
-[numthreads(8,8,8)]
+[numthreads(8, 8, 8)]
 void Main (uint3 id : SV_DispatchThreadID)
 {
     float3 center = (float3)(0.5);
@@ -18,5 +18,5 @@ void Main (uint3 id : SV_DispatchThreadID)
     float d = distance(center,fx);
 
     Volume[id] = float2(0.9-d,0);
-    TestBuffer.Append(id);
+   // TestBuffer.Append(id);
 }

@@ -1,0 +1,82 @@
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel EmitVertex
+
+
+struct Vertex
+{
+    float3 position;
+    float3 normal;
+};
+RWStructuredBuffer<Vertex> VertexOut;
+Texture3D<float2> Volume;
+float3 Origin;
+float VoxelSize;
+uint SizeInVoxels;
+RWTexture3D<uint> IndexOutMapX;
+RWTexture3D<uint> IndexOutMapY;
+RWTexture3D<uint> IndexOutMapZ;
+
+//shared float sharedDensity[THREADS_PER_GROUP_X + 2][THREADS_PER_GROUP_Y + 2];
+
+
+static const float iso = 0.5;
+
+[numthreads(8,8,8)]
+void EmitVertex(uint3 id : SV_DispatchThreadID)
+{
+    if (any(id + 1 == SizeInVoxels))
+        return;
+
+
+
+    float d = Volume[id].x;
+    float dx = Volume[id + uint3(1, 0, 0)].x;
+    float dy = Volume[id + uint3(0, 1, 0)].x;
+    float dz = Volume[id + uint3(0, 0, 1)].x;
+    float3 neighbors = float3(dx, dy, dz);
+    float3 delta = neighbors - d;
+    float3 x = (iso - d) / delta;
+    bool3 edge = x >= 0 && x < 1;
+    float3 p0 = Origin + VoxelSize * id;
+
+    //if (any(edge))
+    //{
+    //    uint i = VertexOut.IncrementCounter();
+    //    Vertex v;
+    //    v.position = p0;
+    //    v.position.x += VoxelSize * x.x;
+    //    v.normal = normalize(-delta);
+    //    VertexOut[i] = v;
+    //}
+
+    if (edge.x)
+    {
+        uint i = VertexOut.IncrementCounter();
+        IndexOutMapX[id] = i;
+        Vertex v;
+        v.position = p0;
+        v.position.x += VoxelSize * x.x;
+        v.normal = normalize(-delta);
+        VertexOut[i] = v;
+    }
+    if (edge.y)
+    {
+        uint i = VertexOut.IncrementCounter();
+        IndexOutMapY[id] = i;
+        Vertex v;
+        v.position = p0;
+        v.position.y += VoxelSize * x.y;
+        v.normal = normalize(-delta);
+        VertexOut[i] = v;
+    }
+    if (edge.z)
+    {
+        uint i = VertexOut.IncrementCounter();
+        IndexOutMapZ[id] = i;
+        Vertex v;
+        v.position = p0;
+        v.position.z += VoxelSize * x.z;
+        v.normal = normalize(-delta);
+        VertexOut[i] = v;
+    }
+}

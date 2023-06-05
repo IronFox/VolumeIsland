@@ -7,11 +7,13 @@ Shader "Custom/SliceShader"
         _Glossiness ("Smoothness", Range(0,1)) = 0.5
         _Metallic ("Metallic", Range(0,1)) = 0.0
         _Slice ("Slice", Range(0,1)) = 0.0
+        _SizeInVoxels("SizeInVoxels", Range(0,1000)) = 1.0
     }
     SubShader
     {
         Tags { "RenderType"="TransparentCutout" "Queue"="AlphaTest"}
         LOD 200
+        Cull Off
 
         CGPROGRAM
         // Physically based Standard lighting model, and enable shadows on all light types
@@ -32,6 +34,7 @@ Shader "Custom/SliceShader"
         half _Metallic;
         fixed4 _Color;
         float _Slice;
+        int _SizeInVoxels;
 
         // Add instancing support for this shader. You need to check 'Enable Instancing' on materials that use the shader.
         // See https://docs.unity3d.com/Manual/GPUInstancing.html for more information about instancing.
@@ -43,20 +46,34 @@ Shader "Custom/SliceShader"
         void surf (Input IN, inout SurfaceOutputStandard o)
         {
             // Albedo comes from a texture tinted by color
-            fixed4 c = tex3D (_MainTex, float3(IN.uv_MainTex,_Slice));
-            o.Albedo = 1;
+            //fixed4 c = tex3D (_MainTex, float3(IN.uv_MainTex,_Slice));
+            //float d = c.r;
+
+            float3 c = float3(IN.uv_MainTex, _Slice);
+
+            float d = 0;
+
+            /*for (int ix = -1; ix <= 1; ix++)
+            for (int iy = -1; iy <= 1; iy++)
+            for (int iz = -1; iz <= 1; iz++)
+                d += tex3D(_MainTex, c + float3(ix,iy,iz)/ _SizeInVoxels);
+            d /= 27;*/
+
+            d = tex3D(_MainTex, c );
+
+            o.Albedo = d < 0.502 ? 1 : 0;
             // Metallic and smoothness come from slider variables
             o.Metallic = _Metallic;
             o.Smoothness = _Glossiness;
-            o.Alpha = c.r;
+            o.Alpha = d;
 
-            float dx = tex3D (_MainTex, float3(IN.uv_MainTex+float2(1.0/8,0),_Slice));
-            float dy = tex3D (_MainTex, float3(IN.uv_MainTex+float2(0,1.0/8),_Slice));
-            float dz = tex3D (_MainTex, float3(IN.uv_MainTex,_Slice + 1.0/8));
-            o.Normal = c.r - float3(dx,dy,dz);
+            float dx = tex3D (_MainTex, c + float3(1.0 / _SizeInVoxels, 0, 0));
+            float dy = tex3D (_MainTex, c + float3(0, 1.0 / _SizeInVoxels, 0));
+            float dz = tex3D (_MainTex, c + float3(0, 0, 1.0 / _SizeInVoxels));
+            o.Normal = normalize(d - float3(dx,dy,dz));
             o.Normal.z = -o.Normal.z;
             
-            clip(c.r - 0.5);
+            clip(d - 0.5);
             //o.Alpha = 0.5;
         }
         ENDCG

@@ -248,6 +248,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   shader: {fileID: 0}
   generateTerrain: {fileID: 7200000, guid: e486c40b2379d57458afd30fcf105e5a, type: 3}
+  emitVertexes: {fileID: 7200000, guid: 8a9842d46a00da74b8eb3ba94c9b256a, type: 3}
   outTarget: {fileID: 0}
   countResult: []
   slicePrefab: {fileID: 8004923655706609058, guid: d1f9a9481093c37478ea1792b88da049, type: 3}

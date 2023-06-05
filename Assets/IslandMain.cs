@@ -2,6 +2,7 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Threading.Tasks;
 using Unity.Collections;
 using Unity.VisualScripting;
 using UnityEngine;
@@ -9,30 +10,101 @@ using UnityEngine.Rendering;
 
 public class IslandMain : MonoBehaviour
 {
-    public ComputeShader shader;
+    //public ComputeShader shader;
     public ComputeShader generateTerrain;
-    private RenderTexture target;
+    public ComputeShader emitVertexes;
     public RenderTexture outTarget;
-
-    public Vector3Int[] countResult;
 
     public GameObject slicePrefab;
 
-    public List<GameObject> instances = new();
-    public int debugCount;
+ 
+    public RenderTexture SharedVertexIndexMapX { get; private set; }
+    public RenderTexture SharedVertexIndexMapY { get; private set; }
+    public RenderTexture SharedVertexIndexMapZ { get; private set; }
 
-    public class Sector
+    public class SharedVertex
     {
-        public const int SizeInVoxels = 8;    //number of voxels along every edge
-        public const float VoxelSize = 1;    //10cm per voxel
+        public const int PositionSizeFloats = 3;
+        public const int NormalSizeFloats = 3;
+
+
+        public const int SizeFloats = PositionSizeFloats + NormalSizeFloats;
+
+        public const int SizeBytes = SizeFloats * 4;
+    }
+
+    public ComputeBuffer SharedVertexBuffer { get; private set;  }
+
+
+    public class CountResolver : IDisposable
+    {
+        private readonly ComputeBuffer counterValueBuffer;
+        public CountResolver()
+        {
+
+            counterValueBuffer = new(1, 4, ComputeBufferType.Raw);
+
+ 
+            //Debug.Log("count: " + count);
+
+
+            //int[] data = new int[count * 3];
+            //counterBuffer.GetData(data);
+
+
+            //countResult = new Vector3Int[count];
+            //for (int i = 0; i < count; i++)
+            //    countResult[i] = new(data[i * 3], data[i * 3 + 1], data[i * 3 + 2]);
+
+
+        }
+
+        public int GetNow(ComputeBuffer source)
+        {
+            ComputeBuffer.CopyCount(source, counterValueBuffer, 0);
+            var asyncRequest = AsyncGPUReadback.Request(counterValueBuffer, counterValueBuffer.stride, 0);
+            asyncRequest.WaitForCompletion();
+
+            return asyncRequest.GetData<int>()[0];
+        }
+
+        public Task<int> GetAsync(ComputeBuffer source)
+        {
+            ComputeBuffer.CopyCount(source, counterValueBuffer, 0);
+            TaskCompletionSource<int> rs = new();
+            var asyncRequest = AsyncGPUReadback.Request(counterValueBuffer, counterValueBuffer.stride, 0,req =>
+            {
+                rs.SetResult(req.GetData<int>()[0]);
+            });
+            return rs.Task;
+        }
+
+        public void Dispose()
+        {
+            counterValueBuffer.Dispose();
+        }
+    }
+
+
+    public class Sector : IDisposable
+    {
+        public const int SizeInVoxels = 256;    //number of voxels along every edge
+        public const float VoxelSize = 0.5f;    //10cm per voxel
         //public const float VoxelSize = 0.1f;    //10cm per voxel
         public const float SectorSize = SizeInVoxels * VoxelSize;
 
-        public const int ByteCount = SizeInVoxels * SizeInVoxels * SizeInVoxels * 2;
+        public const int KernelSize = 8;
 
-        public RenderTexture Texture { get; }
+        public const int TotalVoxelCount = SizeInVoxels * SizeInVoxels * SizeInVoxels;
 
-        public Vector3 Center { get; }
+        public const int ByteCount = TotalVoxelCount * 2;
+
+        public RenderTexture DensityMaterialMap { get; }
+
+
+        public Vector3 Origin { get; }
+
+
 
 
         //public byte[] DensityMaterial = new byte[ByteCount];
@@ -53,96 +125,116 @@ public class IslandMain : MonoBehaviour
 
 
 
-        public Sector(Vector3 center)
+        public Sector(Vector3 origin)
         {
-            Center = center;
-            Texture = new(SizeInVoxels, SizeInVoxels, SizeInVoxels, RenderTextureFormat.RG16);
-            Texture.depth = 0;
-            Texture.enableRandomWrite = true;
-            Texture.dimension = TextureDimension.Tex3D;
-            Texture.width = SizeInVoxels;
-            Texture.volumeDepth = SizeInVoxels;
-            Texture.height = SizeInVoxels;
+            Origin = origin;
+            DensityMaterialMap = new(SizeInVoxels, SizeInVoxels, 0, RenderTextureFormat.RG16);
+            DensityMaterialMap.enableRandomWrite = true;
+            DensityMaterialMap.dimension = TextureDimension.Tex3D;
+            DensityMaterialMap.volumeDepth = SizeInVoxels;
             //Texture.filterMode = FilterMode.Point;
-            Texture.Create();
+            DensityMaterialMap.Create();
+
         }
 
-
-
-
-
+        public void Dispose()
+        {
+            Destroy(DensityMaterialMap);
+        }
     }
 
 
+    public static RenderTexture MakeVolume(int edgeDimension, RenderTextureFormat format)
+    {
+        RenderTexture t = new(edgeDimension, edgeDimension, 0, format);
+        t.volumeDepth = edgeDimension;
+        t.dimension = TextureDimension.Tex3D;
+        t.enableRandomWrite = true;
+        t.Create();
+        return t;
+    }
 
     public Sector sector;
+
+
+    void OnDestroy()
+    {
+        sector.Dispose();
+        Destroy(SharedVertexIndexMapX);
+        Destroy(SharedVertexIndexMapY);
+        Destroy(SharedVertexIndexMapZ);
+        SharedVertexBuffer.Dispose();
+    }
 
     // Start is called before the first frame update
     void Start()
     {
         sector = new(Vector3.zero);
 
+        SharedVertexIndexMapX = MakeVolume(Sector.SizeInVoxels - 1, RenderTextureFormat.RInt);
+        SharedVertexIndexMapY = MakeVolume(Sector.SizeInVoxels - 1, RenderTextureFormat.RInt);
+        SharedVertexIndexMapZ = MakeVolume(Sector.SizeInVoxels - 1, RenderTextureFormat.RInt);
+
+
+        SharedVertexBuffer = new(Sector.TotalVoxelCount * 3, SharedVertex.SizeBytes, ComputeBufferType.Counter);
+        SharedVertexBuffer.SetCounterValue(0);
+
+
+
+
+
 
         var kernel = generateTerrain.FindKernel("Main");
-        generateTerrain.SetTexture(kernel, "Volume", sector.Texture);
-        generateTerrain.SetVector("Center", sector.Center);
+        generateTerrain.SetTexture(kernel, "Volume", sector.DensityMaterialMap);
+        generateTerrain.SetVector("Origin", sector.Origin);
         generateTerrain.SetFloat("VoxelSize", Sector.VoxelSize);
         generateTerrain.SetInt("SizeInVoxels", Sector.SizeInVoxels);
 
-        using ComputeBuffer counterBuffer = new ComputeBuffer(65536, sizeof(int) * 3, ComputeBufferType.Append);
-        counterBuffer.SetCounterValue(0);
-        generateTerrain.SetBuffer(kernel, "TestBuffer", counterBuffer);
+        //using ComputeBuffer counterBuffer = new ComputeBuffer(65536, sizeof(int) * 3, ComputeBufferType.Append);
+        //counterBuffer.SetCounterValue(0);
+        //generateTerrain.SetBuffer(kernel, "TestBuffer", counterBuffer);
 
 
-        generateTerrain.Dispatch(kernel, Sector.SizeInVoxels / 8, Sector.SizeInVoxels / 8, Sector.SizeInVoxels / 8);
+        generateTerrain.Dispatch(kernel, Sector.SizeInVoxels / Sector.KernelSize, Sector.SizeInVoxels / Sector.KernelSize, Sector.SizeInVoxels / Sector.KernelSize);
 
-        outTarget = sector.Texture;
-
-        using ComputeBuffer counterValueBuffer = new(1, 4, ComputeBufferType.Raw);
-
-        ComputeBuffer.CopyCount(counterBuffer, counterValueBuffer, 0);
-        var asyncRequest = AsyncGPUReadback.Request(counterValueBuffer, counterValueBuffer.stride, 0);
-        asyncRequest.WaitForCompletion();
-
-        //int[] countAr = new int[1];
-        var count = asyncRequest.GetData<int>()[0];
-        //var count = countAr[0];
-
-        Debug.Log("count: " + count);
+        outTarget = sector.DensityMaterialMap;
 
 
-        int[] data = new int[count * 3];
-        counterBuffer.GetData(data);
+
+        kernel = emitVertexes.FindKernel("EmitVertex");
+        SharedVertexBuffer.SetCounterValue(0);
+        emitVertexes.SetTexture(kernel, "Volume", sector.DensityMaterialMap);
+        emitVertexes.SetVector("Origin", sector.Origin);
+        emitVertexes.SetFloat("VoxelSize", Sector.VoxelSize);
+        emitVertexes.SetInt("SizeInVoxels", Sector.SizeInVoxels);
+        emitVertexes.SetBuffer(kernel, "VertexOut", SharedVertexBuffer);
+        emitVertexes.SetTexture(kernel,"IndexOutMapX" , SharedVertexIndexMapX);
+        emitVertexes.SetTexture(kernel,"IndexOutMapY" , SharedVertexIndexMapY);
+        emitVertexes.SetTexture(kernel,"IndexOutMapZ" , SharedVertexIndexMapZ);
+
+        emitVertexes.Dispatch(kernel, Sector.SizeInVoxels / Sector.KernelSize, Sector.SizeInVoxels / Sector.KernelSize, Sector.SizeInVoxels / Sector.KernelSize);
+
+        using CountResolver resolver = new();
+        Debug.Log("Emitted vertexes: " + resolver.GetNow(SharedVertexBuffer));
 
 
-        countResult = new Vector3Int[count];
-        for (int i = 0; i < count; i++)
-            countResult[i] = new(data[i * 3], data[i * 3 + 1], data[i * 3 + 2]);
+
 
 
 
         if (slicePrefab is not null)
         {
-            for (int i = 0; i < Sector.SizeInVoxels*2; i++)
+            for (int i = 0; i < Sector.SizeInVoxels; i++)
             {
-                debugCount++;
-                try
+                var slice = Instantiate(slicePrefab, transform);
+                slice.transform.localScale = new Vector3(10, 10, 10);
+                slice.transform.localPosition = new Vector3(0, 0, (float)i / Sector.SizeInVoxels * 10);
+                var mesh = slice.GetComponentInChildren<MeshRenderer>();
+                if (mesh is not null)
                 {
-
-                    var slice = Instantiate(slicePrefab, transform);
-                    slice.transform.localScale = new Vector3(10, 10, 10);
-                    slice.transform.localPosition = new Vector3(0, 0, (float)i / Sector.SizeInVoxels * 5);
-                    var mesh = slice.GetComponentInChildren<MeshRenderer>();
-                    if (mesh is not null)
-                    {
-                        mesh.material.SetFloat("_Slice", (float)i / Sector.SizeInVoxels / 2);
-                        mesh.material.SetTexture("_MainTex", sector.Texture);
-                    }
-                    instances.Add(slice);
-                }
-                catch (Exception ex)
-                {
-                    Debug.LogException(ex);
+                    mesh.material.SetFloat("_Slice", (float)i / Sector.SizeInVoxels);
+                    mesh.material.SetFloat("_SizeInVoxels", Sector.SizeInVoxels);
+                    mesh.material.SetTexture("_MainTex", sector.DensityMaterialMap);
                 }
 
 
