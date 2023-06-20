@@ -16,6 +16,9 @@ uint SizeInVoxels;
 RWTexture3D<uint> IndexOutMapX;
 RWTexture3D<uint> IndexOutMapY;
 RWTexture3D<uint> IndexOutMapZ;
+AppendStructuredBuffer<uint4> DebugIndexOutX;
+AppendStructuredBuffer<uint4> DebugIndexOutY;
+AppendStructuredBuffer<uint4> DebugIndexOutZ;
 
 //shared float sharedDensity[THREADS_PER_GROUP_X + 2][THREADS_PER_GROUP_Y + 2];
 
@@ -87,7 +90,14 @@ void EmitVertex(uint3 id : SV_DispatchThreadID, uint3 localId : SV_GroupThreadID
     bool4 d0 = float4(d, dx, dy, dz) >= iso;
     bool4 d1 = float4(dxy, dyz, dxz, dxyz) >= iso;
 
-    if ((any(d0) || any(d1)) && !(all(d0) && all(d1)))
+    //bool debugEmit = all(id == uint3(0, 0, 0));
+
+    //if (!debugEmit)
+    //    return;
+
+    uint cubeindex = 0;
+    if (all(id < SizeInVoxels-1))
+        if ((any(d0) || any(d1)) && !(all(d0) && all(d1)))
     {
         float value0 = d;
         float value1 = dx; // px
@@ -98,7 +108,6 @@ void EmitVertex(uint3 id : SV_DispatchThreadID, uint3 localId : SV_GroupThreadID
         float value6 = dyz; // pyz
         float value7 = dxyz; // pxyz
 
-        uint cubeindex = 0;
         if (value0 < iso)
             cubeindex |= 1;
         if (value1 < iso)
@@ -116,8 +125,7 @@ void EmitVertex(uint3 id : SV_DispatchThreadID, uint3 localId : SV_GroupThreadID
         if (value7 < iso)
             cubeindex |= 64;
 
-        if (all(id == uint3(1, 1, 0)))
-            CellOut.Append(uint4(id, cubeindex));
+        CellOut.Append(uint4(id, cubeindex));
     }
 
     float3 neighbors = float3(dx, dy, dz);
@@ -135,7 +143,7 @@ void EmitVertex(uint3 id : SV_DispatchThreadID, uint3 localId : SV_GroupThreadID
     //    v.normal = normalize(-delta);
     //    VertexOut[i] = v;
     //}
-
+    
     if (edge.x)
     {
         uint i = VertexOut.IncrementCounter();
@@ -145,7 +153,12 @@ void EmitVertex(uint3 id : SV_DispatchThreadID, uint3 localId : SV_GroupThreadID
         v.position.x += VoxelSize * x.x;
         v.normal = normalize(-delta);
         VertexOut[i] = v;
+        DebugIndexOutX.Append(int4(id, i));
     }
+    else
+        IndexOutMapX[id] = 0xffffffff;
+
+
     if (edge.y)
     {
         uint i = VertexOut.IncrementCounter();
@@ -155,7 +168,10 @@ void EmitVertex(uint3 id : SV_DispatchThreadID, uint3 localId : SV_GroupThreadID
         v.position.y += VoxelSize * x.y;
         v.normal = normalize(-delta);
         VertexOut[i] = v;
+        DebugIndexOutY.Append(int4(id, i));
     }
+    else
+        IndexOutMapY[id] = 0xffffffff;
     if (edge.z)
     {
         uint i = VertexOut.IncrementCounter();
@@ -165,5 +181,8 @@ void EmitVertex(uint3 id : SV_DispatchThreadID, uint3 localId : SV_GroupThreadID
         v.position.z += VoxelSize * x.z;
         v.normal = normalize(-delta);
         VertexOut[i] = v;
+        DebugIndexOutZ.Append(int4(id,i));
     }
+    else
+        IndexOutMapZ[id] = 0xffffffff;
 }

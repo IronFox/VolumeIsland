@@ -12,6 +12,7 @@ using Unity.Collections;
 using Unity.VisualScripting;
 using UnityEngine;
 using UnityEngine.Rendering;
+using Color = UnityEngine.Color;
 
 public class IslandMain : MonoBehaviour
 {
@@ -39,6 +40,9 @@ public class IslandMain : MonoBehaviour
     public RenderTexture SharedVertexIndexMapY { get; private set; }
     public RenderTexture SharedVertexIndexMapZ { get; private set; }
     public ComputeBuffer SharedCellBuffer { get; private set; }
+    public ComputeBuffer DebugIndexOutX { get; private set; }
+    public ComputeBuffer DebugIndexOutY { get; private set; }
+    public ComputeBuffer DebugIndexOutZ { get; private set; }
 
 #endif
 
@@ -63,7 +67,7 @@ public class IslandMain : MonoBehaviour
 
             counterValueBuffer = new(1, 4, ComputeBufferType.Raw);
 
- 
+
             //Debug.Log("count: " + count);
 
 
@@ -78,13 +82,36 @@ public class IslandMain : MonoBehaviour
 
         }
 
+        public static NativeArray<T> GetAllNow<T>(ComputeBuffer source, int stride, int count, int offset) where T:struct
+        {
+            if (count == 0)
+                return new NativeArray<T>(0,Allocator.Temp, NativeArrayOptions.ClearMemory);
+            var asyncRequest = AsyncGPUReadback.Request(source, stride*count, offset * count);
+            asyncRequest.WaitForCompletion();
+
+            return asyncRequest.GetData<T>();
+
+        }
+
+        public static Task<NativeArray<T>> GetAllAsync<T>(ComputeBuffer source, int stride, int count, int offset) where T : struct
+        {
+            if (count == 0)
+                return Task.FromResult(
+                    new NativeArray<T>(0, Allocator.Temp, NativeArrayOptions.ClearMemory)
+                );
+            TaskCompletionSource<NativeArray<T>> rs = new();
+            var asyncRequest = AsyncGPUReadback.Request(source, stride*count, offset*count, req =>
+            {
+                rs.SetResult(req.GetData<T>());
+            });
+            return rs.Task;
+        }
+
+
         public int GetNow(ComputeBuffer source)
         {
             ComputeBuffer.CopyCount(source, counterValueBuffer, 0);
-            var asyncRequest = AsyncGPUReadback.Request(counterValueBuffer, counterValueBuffer.stride, 0);
-            asyncRequest.WaitForCompletion();
-
-            return asyncRequest.GetData<int>()[0];
+            return GetAllNow<int>(counterValueBuffer, counterValueBuffer.stride, 1, 0)[0];
         }
 
         public Task<int> GetAsync(ComputeBuffer source)
@@ -198,6 +225,9 @@ public class IslandMain : MonoBehaviour
         SharedVertexBuffer?.Dispose();
         SharedIndexBuffer?.Dispose();
         SharedCellBuffer?.Dispose();
+        DebugIndexOutX?.Dispose();
+        DebugIndexOutY?.Dispose();
+        DebugIndexOutZ?.Dispose();
 #if !LOW_RESOLUTION
         Destroy(SharedUpscaledDensityMap);
 #endif
@@ -212,6 +242,23 @@ public class IslandMain : MonoBehaviour
 
     }
 
+    private static Vector3 V(float x) => new(x, x, x);
+    private static Vector3 V(float x, float y, float z) => new(x, y, z);
+
+    private static void DebugDraw(Vector3 v0, Vector3 v1, Color c)
+    {
+        Debug.DrawLine(v0*10-V(5,5,0), v1 * 10 - V(5,5,0), c, 1e20f);
+    }
+
+    private static void DebugDrawPoint(float x, float y, float z, Color c, float size = 0.1f)
+    {
+        DebugDraw(new(x - size, y, z), new(x + size, y, z), c);
+        DebugDraw(new(x, y - size, z), new(x, y + size, z), c);
+        DebugDraw(new(x, y, z - size), new(x, y, z + size), c);
+
+    }
+
+    private static string Ar<T>(IEnumerable<T> i) => "["+string.Join(",", i)+"]";
 
     public float[] outVertexData;
     public int[] outIndexData;
@@ -226,14 +273,14 @@ public class IslandMain : MonoBehaviour
         SharedJobSizeBuffer.SetData(new int[] { 1, 1, 1 });
 
         SharedTriangleTable = new(TriTable.Length, 2, ComputeBufferType.Constant);
-        SharedTriangleTable.SetData(new NativeArray<short>(TriTable,Allocator.Persistent));
+        SharedTriangleTable.SetData(new NativeArray<short>(TriTable,Allocator.Temp));
 
 
         sector = new(Vector3.zero);
 
-        SharedVertexIndexMapX = MakeVolume(Sector.OutputSizeInVoxels - 1, RenderTextureFormat.RInt);
-        SharedVertexIndexMapY = MakeVolume(Sector.OutputSizeInVoxels - 1, RenderTextureFormat.RInt);
-        SharedVertexIndexMapZ = MakeVolume(Sector.OutputSizeInVoxels - 1, RenderTextureFormat.RInt);
+        SharedVertexIndexMapX = MakeVolume(Sector.OutputSizeInVoxels, RenderTextureFormat.RInt);
+        SharedVertexIndexMapY = MakeVolume(Sector.OutputSizeInVoxels, RenderTextureFormat.RInt);
+        SharedVertexIndexMapZ = MakeVolume(Sector.OutputSizeInVoxels, RenderTextureFormat.RInt);
 
 
         SharedIndexBuffer = new(Sector.TotalOutputVoxelCount * 5, 12, ComputeBufferType.Append);
@@ -244,6 +291,12 @@ public class IslandMain : MonoBehaviour
         SharedCellBuffer = new(Sector.TotalOutputVoxelCount, 16, ComputeBufferType.Append); //x,y,z,i = 3*4
         SharedCellBuffer.SetCounterValue(0);
 
+        DebugIndexOutX = new(Sector.TotalOutputVoxelCount, 16, ComputeBufferType.Append); //x,y,z,i = 3*4
+        DebugIndexOutX.SetCounterValue(0);
+        DebugIndexOutY = new(Sector.TotalOutputVoxelCount, 16, ComputeBufferType.Append); //x,y,z,i = 3*4
+        DebugIndexOutY.SetCounterValue(0);
+        DebugIndexOutZ = new(Sector.TotalOutputVoxelCount, 16, ComputeBufferType.Append); //x,y,z,i = 3*4
+        DebugIndexOutZ.SetCounterValue(0);
 
 
 
@@ -294,21 +347,76 @@ public class IslandMain : MonoBehaviour
         emitVertexes.SetTexture(kernel,"IndexOutMapX" , SharedVertexIndexMapX);
         emitVertexes.SetTexture(kernel,"IndexOutMapY" , SharedVertexIndexMapY);
         emitVertexes.SetTexture(kernel,"IndexOutMapZ" , SharedVertexIndexMapZ);
-
+        emitVertexes.SetBuffer(kernel,"DebugIndexOutX" , DebugIndexOutX);
+        emitVertexes.SetBuffer(kernel,"DebugIndexOutY" , DebugIndexOutY);
+        emitVertexes.SetBuffer(kernel,"DebugIndexOutZ" , DebugIndexOutZ);
+        
         Dispatch(emitVertexes, kernel, Sector.OutputSizeInVoxels);
 
         using CountResolver resolver = new();
         var vertexCount = resolver.GetNow(SharedVertexBuffer);
         Debug.Log("Emitted vertexes: " + vertexCount);
+
+
+
         Debug.Log("Emitted cells: " + resolver.GetNow(SharedCellBuffer));
+        int[] cells = CountResolver.GetAllNow<int>(SharedCellBuffer, 4, 4, 0).ToArray();
+        Debug.Log($"First Cell: {string.Join(", ", cells)}");
+        Debug.Log($"Bits: {cells[3].ToBinaryString()}");
 
         var requestBytes = VertexLayout.SizeBytes * vertexCount;
         Debug.Log("Requesting " + requestBytes + " bytes");
-        var vtxReq = AsyncGPUReadback.Request(SharedVertexBuffer, requestBytes,0);
-        vtxReq.WaitForCompletion();
-        var data = vtxReq.GetData<float>();
-        Debug.Log($"Got w={vtxReq.width} #l={vtxReq.layerCount} lds={vtxReq.layerDataSize} #f={data.Length}");
-        outVertexData = data.Take(16 * VertexLayout.SizeFloats).ToArray();
+
+        outVertexData = CountResolver.GetAllNow<float>(SharedVertexBuffer, VertexLayout.SizeBytes, vertexCount, 0).ToArray();
+        Debug.Log($"Got {outVertexData.Length} vertexes from VRAM");
+
+        int xCnt = resolver.GetNow(DebugIndexOutX);
+        int yCnt = resolver.GetNow(DebugIndexOutY);
+        int zCnt = resolver.GetNow(DebugIndexOutZ);
+
+        Debug.Log($"Got {xCnt},{yCnt},{zCnt} indexes");
+
+        int[] debugIndexOutX = CountResolver.GetAllNow<int>(DebugIndexOutX, 4, xCnt * 4, 0).ToArray();
+        int[] debugIndexOutY = CountResolver.GetAllNow<int>(DebugIndexOutY, 4, yCnt * 4, 0).ToArray();
+        int[] debugIndexOutZ = CountResolver.GetAllNow<int>(DebugIndexOutZ, 4, zCnt * 4, 0).ToArray();
+
+        Debug.Log($"X:{Ar(debugIndexOutX)}");
+        Debug.Log($"Y:{Ar(debugIndexOutY)}");
+        Debug.Log($"Z:{Ar(debugIndexOutZ)}");
+
+
+
+
+        for (int i = 0; i < Sector.OutputSizeInVoxels; i++)
+        for (int j = 0; j < Sector.OutputSizeInVoxels; j++)
+        for (int k = 0; k < Sector.OutputSizeInVoxels; k++)
+        {
+            DebugDraw(
+                sector.Origin + new Vector3(i, j, 0) * Sector.OutputVoxelSize, 
+                sector.Origin + new Vector3(i, j, Sector.CoreSizeInInputVoxels) * Sector.OutputVoxelSize,
+                Color.gray);
+            DebugDraw(
+                sector.Origin + new Vector3(i, 0, j) * Sector.OutputVoxelSize, 
+                sector.Origin + new Vector3(i, Sector.CoreSizeInInputVoxels, j) * Sector.OutputVoxelSize,
+                Color.gray);
+            DebugDraw(
+                sector.Origin + new Vector3(0, i, j) * Sector.OutputVoxelSize, 
+                sector.Origin + new Vector3(Sector.CoreSizeInInputVoxels, i, j) * Sector.OutputVoxelSize,
+                Color.gray);
+        }
+        for (int i = 0; i < vertexCount; i++)
+        {
+            float x = outVertexData[i * VertexLayout.SizeFloats];
+            float y = outVertexData[i * VertexLayout.SizeFloats + 1];
+            float z = outVertexData[i * VertexLayout.SizeFloats + 2];
+            DebugDrawPoint(x, y, z, UnityEngine.Color.red);
+        }
+
+        
+        //Texture2D t = new Texture2D(SharedVertexIndexMapX.width, SharedVertexIndexMapX.height, TextureFormat.RFloat, false);
+
+        //Graphics.CopyTexture(SharedVertexIndexMapX, t);
+        //Debug.Log($"Z0: {Ar(t.GetPixelData<int>(0))}");
 
 
         ComputeBuffer.CopyCount(SharedCellBuffer, SharedJobSizeBuffer, 0);
@@ -330,11 +438,12 @@ public class IslandMain : MonoBehaviour
 
 
         var numT = resolver.GetNow(SharedIndexBuffer);
-        Debug.Log($"Emitted triangle indexes: {numT}");
+        Debug.Log($"Emitted index triples: {numT}");
 
-        var idxReq = AsyncGPUReadback.Request(SharedIndexBuffer, 4 * 3 * Math.Min(10,numT*3), 0);
-        idxReq.WaitForCompletion();
-        outIndexData = idxReq.GetData<int>().ToArray();
+        Debug.Log($"Indexes: {Ar(CountResolver.GetAllNow<int>(SharedIndexBuffer,4,numT*3,0))}");
+        //var idxReq = AsyncGPUReadback.Request(SharedIndexBuffer, 4 * 3 * Math.Min(10,numT*3), 0);
+        //idxReq.WaitForCompletion();
+        //outIndexData = idxReq.GetData<int>().ToArray();
 
         if (slicePrefab is not null)
         {
@@ -342,7 +451,7 @@ public class IslandMain : MonoBehaviour
             {
                 var slice = Instantiate(slicePrefab, transform);
                 slice.transform.localScale = new Vector3(10, 10, 10);
-                slice.transform.localPosition = new Vector3(0, 0, (float)i / Sector.OutputSizeInVoxels * 10);
+                slice.transform.localPosition = new Vector3(0, 0, (float)i / (Sector.OutputSizeInVoxels-1) * 10);
                 var mesh = slice.GetComponentInChildren<MeshRenderer>();
                 if (mesh is not null)
                 {
