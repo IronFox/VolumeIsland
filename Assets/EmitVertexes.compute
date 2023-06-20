@@ -8,7 +8,7 @@ struct Vertex
     float3 normal;
 };
 RWStructuredBuffer<Vertex> VertexOut;
-AppendStructuredBuffer<uint3> CellOut;
+AppendStructuredBuffer<uint4> CellOut;
 Texture3D<float2> Volume;
 float3 Origin;
 float VoxelSize;
@@ -27,60 +27,98 @@ groupshared float loaded[9][9][9];
 [numthreads(8,8,8)]
 void EmitVertex(uint3 id : SV_DispatchThreadID, uint3 localId : SV_GroupThreadID)
 {
-
-    loaded[localId.x][localId.y][localId.z] = Volume[id].x;
-    if (localId.x == 7)
+    if (all(id < SizeInVoxels))
     {
-        loaded[8][localId.y][localId.z] = Volume[id + uint3(1, 0, 0)].x;
+        loaded[localId.x][localId.y][localId.z] = Volume[id].x;
+        if (localId.x == 7)
+        {
+            loaded[8][localId.y][localId.z] = Volume[id + uint3(1, 0, 0)].x;
         
+            if (localId.y == 7)
+            {
+                loaded[8][8][localId.z] = Volume[id + uint3(1, 1, 0)].x;
+
+                if (localId.z == 7)
+                {
+                    loaded[8][8][8] = Volume[id + uint3(1, 1, 1)].x;
+                }
+            }
+        }
         if (localId.y == 7)
         {
-            loaded[8][8][localId.z] = Volume[id + uint3(1, 1, 0)].x;
+            loaded[localId.x][8][localId.z] = Volume[id + uint3(0, 1, 0)].x;
 
             if (localId.z == 7)
             {
-                loaded[8][8][8] = Volume[id + uint3(1, 1, 1)].x;
+                loaded[localId.x][8][8] = Volume[id + uint3(0, 1, 1)].x;
             }
         }
-    }
-    if (localId.y == 7)
-    {
-        loaded[localId.x][8][localId.z] = Volume[id + uint3(0, 1, 0)].x;
-
         if (localId.z == 7)
         {
-            loaded[localId.x][8][8] = Volume[id + uint3(0, 1, 1)].x;
+            loaded[localId.x][localId.y][8] = Volume[id + uint3(0, 0, 1)].x;
         }
     }
-    if (localId.z == 7)
-    {
-        loaded[localId.x][localId.y][8] = Volume[id + uint3(0, 0, 1)].x;
-    }
-
+    
     AllMemoryBarrierWithGroupSync();
-
-    if (any(id + 1 == SizeInVoxels))
+    
+    
+    if (any(id >= SizeInVoxels))
         return;
+    
+    
 
+    //if (any(id + 1 == SizeInVoxels))
+    //    return;
 
+    uint3 outer = min(localId + 1, SizeInVoxels - 1);
 
 
 
     float d = loaded[localId.x][localId.y][localId.z];
-    float dx = loaded[localId.x + 1][localId.y][localId.z];
-    float dy = loaded[localId.x][localId.y + 1][localId.z];
-    float dz = loaded[localId.x][localId.y][localId.z + 1];
+    float dx = loaded[outer.x][localId.y][localId.z];
+    float dy = loaded[localId.x][outer.y][localId.z];
+    float dz = loaded[localId.x][localId.y][outer.z];
     
-    float da = loaded[localId.x + 1][localId.y + 1][localId.z];
-    float db = loaded[localId.x][localId.y + 1][localId.z + 1];
-    float dc = loaded[localId.x + 1][localId.y][localId.z + 1];
-    float dd = loaded[localId.x + 1][localId.y + 1][localId.z + 1];
+    float dxy = loaded[outer.x][outer.y][localId.z];
+    float dyz = loaded[localId.x][outer.y][outer.z];
+    float dxz = loaded[outer.x][localId.y][outer.z];
+    float dxyz = loaded[outer.x][outer.y][outer.z];
 
     bool4 d0 = float4(d, dx, dy, dz) >= iso;
-    bool4 d1 = float4(da, db, dc, dd) >= iso;
+    bool4 d1 = float4(dxy, dyz, dxz, dxyz) >= iso;
 
     if ((any(d0) || any(d1)) && !(all(d0) && all(d1)))
-        CellOut.Append(id);
+    {
+        float value0 = d;
+        float value1 = dx; // px
+        float value2 = dy; // py
+        float value3 = dxy; // pxy
+        float value4 = dz; // pz
+        float value5 = dxz; // pxz
+        float value6 = dyz; // pyz
+        float value7 = dxyz; // pxyz
+
+        uint cubeindex = 0;
+        if (value0 < iso)
+            cubeindex |= 1;
+        if (value1 < iso)
+            cubeindex |= 2;
+        if (value2 < iso)
+            cubeindex |= 8;
+        if (value3 < iso)
+            cubeindex |= 4;
+        if (value4 < iso)
+            cubeindex |= 16;
+        if (value5 < iso)
+            cubeindex |= 32;
+        if (value6 < iso)
+            cubeindex |= 128;
+        if (value7 < iso)
+            cubeindex |= 64;
+
+        if (all(id == uint3(1, 1, 0)))
+            CellOut.Append(uint4(id, cubeindex));
+    }
 
     float3 neighbors = float3(dx, dy, dz);
     float3 delta = neighbors - d;

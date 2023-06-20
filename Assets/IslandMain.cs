@@ -1,7 +1,12 @@
+//#define VERTEX_ONLY
+
+#define LOW_RESOLUTION
+
 using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Linq;
 using System.Threading.Tasks;
 using Unity.Collections;
 using Unity.VisualScripting;
@@ -12,17 +17,32 @@ public class IslandMain : MonoBehaviour
 {
     //public ComputeShader shader;
     public ComputeShader generateTerrain;
+    public ComputeShader upscaleTerrain;
     public ComputeShader emitVertexes;
+    public ComputeShader marchingCubes;
     public RenderTexture outTarget;
 
     public GameObject slicePrefab;
 
- 
+    public ComputeBuffer SharedTriangleTable { get; private set; }
+    public ComputeBuffer SharedJobSizeBuffer { get; private set; }
+    public ComputeBuffer SharedVertexBuffer { get; private set; }
+    public ComputeBuffer SharedIndexBuffer { get; private set; }
+
+#if !LOW_RESOLUTION
+    public RenderTexture SharedUpscaledDensityMap { get; private set;  }
+#endif
+
+#if !VERTEX_ONLY
+
     public RenderTexture SharedVertexIndexMapX { get; private set; }
     public RenderTexture SharedVertexIndexMapY { get; private set; }
     public RenderTexture SharedVertexIndexMapZ { get; private set; }
+    public ComputeBuffer SharedCellBuffer { get; private set; }
 
-    public class SharedVertex
+#endif
+
+    public class VertexLayout
     {
         public const int PositionSizeFloats = 3;
         public const int NormalSizeFloats = 3;
@@ -33,8 +53,6 @@ public class IslandMain : MonoBehaviour
         public const int SizeBytes = SizeFloats * 4;
     }
 
-    public ComputeBuffer SharedVertexBuffer { get; private set;  }
-    public ComputeBuffer SharedCellBuffer { get; private set;  }
 
 
     public class CountResolver : IDisposable
@@ -89,18 +107,34 @@ public class IslandMain : MonoBehaviour
 
     public class Sector : IDisposable
     {
-        public const int SizeInVoxels = 256;    //number of voxels along every edge
-        public const float VoxelSize = 0.5f;    //10cm per voxel
+#if LOW_RESOLUTION
+        public const int CoreSizeInInputVoxels = 3; //number of voxels along every edge of the persisted grid. 
+        public const int InputSizeInVoxels = 3; //need one more to interpolate output properly
+        public const int OutputSizeInVoxels = 3;
+        public const float InputVoxelSize = 0.5f;   //50cm per input voxel
+        public const float OutputVoxelSize = 0.5f;   //50cm per input voxel
+#else
+
+        public const int CoreSizeInInputVoxels = 32; //number of voxels along every edge of the persisted grid. 
+        public const int InputSizeInVoxels = CoreSizeInInputVoxels + 1; //need one more to interpolate output properly
+        public const float InputVoxelSize = 0.5f;   //50cm per input voxel
+        public const int OutputMultiplier = 8;      //multiplier input -> output
+        public const float OutputVoxelSize = InputVoxelSize / OutputMultiplier; //final output voxel (~5cm)
+        public const int OutputSizeInVoxels = CoreSizeInInputVoxels * OutputMultiplier; //number of voxels along every edge in the final geometry
+
         //public const float VoxelSize = 0.1f;    //10cm per voxel
-        public const float SectorSize = SizeInVoxels * VoxelSize;
+        public const float InputSectorSize = CoreSizeInInputVoxels * InputVoxelSize;
+#endif
 
         public const int KernelSize = 8;
 
-        public const int TotalVoxelCount = SizeInVoxels * SizeInVoxels * SizeInVoxels;
+        public const int TotalInputVoxelCount = InputSizeInVoxels * InputSizeInVoxels * InputSizeInVoxels;
+        public const int TotalOutputVoxelCount = OutputSizeInVoxels * OutputSizeInVoxels * OutputSizeInVoxels;
 
-        public const int ByteCount = TotalVoxelCount * 2;
+        //public const int ByteCount = TotalVoxelCount * 2;
 
-        public RenderTexture DensityMaterialMap { get; }
+        public RenderTexture DensityMap { get; }
+        public RenderTexture MaterialMap { get; }
 
 
         public Vector3 Origin { get; }
@@ -129,18 +163,15 @@ public class IslandMain : MonoBehaviour
         public Sector(Vector3 origin)
         {
             Origin = origin;
-            DensityMaterialMap = new(SizeInVoxels, SizeInVoxels, 0, RenderTextureFormat.RG16);
-            DensityMaterialMap.enableRandomWrite = true;
-            DensityMaterialMap.dimension = TextureDimension.Tex3D;
-            DensityMaterialMap.volumeDepth = SizeInVoxels;
-            //Texture.filterMode = FilterMode.Point;
-            DensityMaterialMap.Create();
+            DensityMap = MakeVolume(InputSizeInVoxels, RenderTextureFormat.R8);
+            MaterialMap = MakeVolume(InputSizeInVoxels, RenderTextureFormat.R8);
 
         }
 
         public void Dispose()
         {
-            Destroy(DensityMaterialMap);
+            Destroy(DensityMap);
+            Destroy(MaterialMap);
         }
     }
 
@@ -160,28 +191,57 @@ public class IslandMain : MonoBehaviour
 
     void OnDestroy()
     {
-        sector.Dispose();
+        sector?.Dispose();
         Destroy(SharedVertexIndexMapX);
         Destroy(SharedVertexIndexMapY);
         Destroy(SharedVertexIndexMapZ);
-        SharedVertexBuffer.Dispose();
-        SharedCellBuffer.Dispose();
+        SharedVertexBuffer?.Dispose();
+        SharedIndexBuffer?.Dispose();
+        SharedCellBuffer?.Dispose();
+#if !LOW_RESOLUTION
+        Destroy(SharedUpscaledDensityMap);
+#endif
+        SharedTriangleTable?.Dispose();
+        SharedJobSizeBuffer?.Dispose();
     }
+
+    private static void Dispatch(ComputeShader shader, int kernel, int resolution)
+    {
+        int x = (resolution+Sector.KernelSize -1) / Sector.KernelSize;
+        shader.Dispatch(kernel, x,x,x);
+
+    }
+
+
+    public float[] outVertexData;
+    public int[] outIndexData;
 
     // Start is called before the first frame update
     void Start()
     {
+#if !LOW_RESOLUTION
+        SharedUpscaledDensityMap = MakeVolume(Sector.OutputSizeInVoxels, RenderTextureFormat.R16);
+#endif
+        SharedJobSizeBuffer = new(3, 4, ComputeBufferType.IndirectArguments);
+        SharedJobSizeBuffer.SetData(new int[] { 1, 1, 1 });
+
+        SharedTriangleTable = new(TriTable.Length, 2, ComputeBufferType.Constant);
+        SharedTriangleTable.SetData(new NativeArray<short>(TriTable,Allocator.Persistent));
+
+
         sector = new(Vector3.zero);
 
-        SharedVertexIndexMapX = MakeVolume(Sector.SizeInVoxels - 1, RenderTextureFormat.RInt);
-        SharedVertexIndexMapY = MakeVolume(Sector.SizeInVoxels - 1, RenderTextureFormat.RInt);
-        SharedVertexIndexMapZ = MakeVolume(Sector.SizeInVoxels - 1, RenderTextureFormat.RInt);
+        SharedVertexIndexMapX = MakeVolume(Sector.OutputSizeInVoxels - 1, RenderTextureFormat.RInt);
+        SharedVertexIndexMapY = MakeVolume(Sector.OutputSizeInVoxels - 1, RenderTextureFormat.RInt);
+        SharedVertexIndexMapZ = MakeVolume(Sector.OutputSizeInVoxels - 1, RenderTextureFormat.RInt);
 
 
-        SharedVertexBuffer = new(Sector.TotalVoxelCount * 3, SharedVertex.SizeBytes, ComputeBufferType.Counter);
+        SharedIndexBuffer = new(Sector.TotalOutputVoxelCount * 5, 12, ComputeBufferType.Append);
+        SharedVertexBuffer = new(Sector.TotalOutputVoxelCount * 3, VertexLayout.SizeBytes, ComputeBufferType.Counter);
+        Debug.Log($"Vertex buffer accomodates {SharedVertexBuffer.count} vertexes in {SharedVertexBuffer.count * SharedVertexBuffer.stride} bytes");
         SharedVertexBuffer.SetCounterValue(0);
 
-        SharedCellBuffer = new(Sector.TotalVoxelCount, 4, ComputeBufferType.Append);
+        SharedCellBuffer = new(Sector.TotalOutputVoxelCount, 16, ComputeBufferType.Append); //x,y,z,i = 3*4
         SharedCellBuffer.SetCounterValue(0);
 
 
@@ -190,58 +250,110 @@ public class IslandMain : MonoBehaviour
 
 
         var kernel = generateTerrain.FindKernel("Main");
-        generateTerrain.SetTexture(kernel, "Volume", sector.DensityMaterialMap);
+        generateTerrain.SetTexture(kernel, "DensityVolume", sector.DensityMap);
+        generateTerrain.SetTexture(kernel, "MaterialVolume", sector.MaterialMap);
         generateTerrain.SetVector("Origin", sector.Origin);
-        generateTerrain.SetFloat("VoxelSize", Sector.VoxelSize);
-        generateTerrain.SetInt("SizeInVoxels", Sector.SizeInVoxels);
+        generateTerrain.SetFloat("VoxelSize", Sector.InputVoxelSize);
+        generateTerrain.SetInt("SizeInVoxels", Sector.InputSizeInVoxels);
 
         //using ComputeBuffer counterBuffer = new ComputeBuffer(65536, sizeof(int) * 3, ComputeBufferType.Append);
         //counterBuffer.SetCounterValue(0);
         //generateTerrain.SetBuffer(kernel, "TestBuffer", counterBuffer);
 
+        Dispatch(generateTerrain, kernel, Sector.InputSizeInVoxels);
 
-        generateTerrain.Dispatch(kernel, Sector.SizeInVoxels / Sector.KernelSize, Sector.SizeInVoxels / Sector.KernelSize, Sector.SizeInVoxels / Sector.KernelSize);
+#if !LOW_RESOLUTION
+        kernel = upscaleTerrain.FindKernel("Upscale");
+        upscaleTerrain.SetTexture(kernel, "Volume", sector.DensityMaterialMap);
+        upscaleTerrain.SetVector("Origin", sector.Origin);
+        upscaleTerrain.SetInt("InputVoxelResolution", Sector.InputSizeInVoxels);
+        upscaleTerrain.SetInt("OutputVoxelResolution", Sector.OutputSizeInVoxels);
+        upscaleTerrain.SetInt("InputOutputMultiplier", Sector.OutputMultiplier);
+        upscaleTerrain.SetTexture(kernel, "OutputDensity", SharedUpscaledDensityMap);
 
-        outTarget = sector.DensityMaterialMap;
+        Dispatch(upscaleTerrain, kernel, Sector.OutputSizeInVoxels);
+        outTarget = SharedUpscaledDensityMap;
+#endif
+
+
 
 
 
         kernel = emitVertexes.FindKernel("EmitVertex");
         SharedVertexBuffer.SetCounterValue(0);
-        emitVertexes.SetTexture(kernel, "Volume", sector.DensityMaterialMap);
+#if !LOW_RESOLUTION
+        emitVertexes.SetTexture(kernel, "Volume", SharedUpscaledDensityMap);
+#else
+        emitVertexes.SetTexture(kernel, "Volume", sector.DensityMap);
+#endif
         emitVertexes.SetVector("Origin", sector.Origin);
-        emitVertexes.SetFloat("VoxelSize", Sector.VoxelSize);
-        emitVertexes.SetInt("SizeInVoxels", Sector.SizeInVoxels);
+        emitVertexes.SetFloat("VoxelSize", Sector.OutputVoxelSize);
+        emitVertexes.SetInt("SizeInVoxels", Sector.OutputSizeInVoxels);
         emitVertexes.SetBuffer(kernel, "VertexOut", SharedVertexBuffer);
         emitVertexes.SetBuffer(kernel, "CellOut", SharedCellBuffer);
         emitVertexes.SetTexture(kernel,"IndexOutMapX" , SharedVertexIndexMapX);
         emitVertexes.SetTexture(kernel,"IndexOutMapY" , SharedVertexIndexMapY);
         emitVertexes.SetTexture(kernel,"IndexOutMapZ" , SharedVertexIndexMapZ);
 
-        emitVertexes.Dispatch(kernel, Sector.SizeInVoxels / Sector.KernelSize, Sector.SizeInVoxels / Sector.KernelSize, Sector.SizeInVoxels / Sector.KernelSize);
+        Dispatch(emitVertexes, kernel, Sector.OutputSizeInVoxels);
 
         using CountResolver resolver = new();
-        Debug.Log("Emitted vertexes: " + resolver.GetNow(SharedVertexBuffer));
+        var vertexCount = resolver.GetNow(SharedVertexBuffer);
+        Debug.Log("Emitted vertexes: " + vertexCount);
         Debug.Log("Emitted cells: " + resolver.GetNow(SharedCellBuffer));
 
+        var requestBytes = VertexLayout.SizeBytes * vertexCount;
+        Debug.Log("Requesting " + requestBytes + " bytes");
+        var vtxReq = AsyncGPUReadback.Request(SharedVertexBuffer, requestBytes,0);
+        vtxReq.WaitForCompletion();
+        var data = vtxReq.GetData<float>();
+        Debug.Log($"Got w={vtxReq.width} #l={vtxReq.layerCount} lds={vtxReq.layerDataSize} #f={data.Length}");
+        outVertexData = data.Take(16 * VertexLayout.SizeFloats).ToArray();
 
 
+        ComputeBuffer.CopyCount(SharedCellBuffer, SharedJobSizeBuffer, 0);
+
+        var cntReq = AsyncGPUReadback.Request(SharedJobSizeBuffer, 12, 0);
+        cntReq.WaitForCompletion();
+        Debug.Log($"Size: {cntReq.GetData<uint>()[0]},{cntReq.GetData<uint>()[1]},{cntReq.GetData<uint>()[2]}");
 
 
+        kernel = marchingCubes.FindKernel("EmitTriangles");
+        SharedIndexBuffer.SetCounterValue(0);
+        marchingCubes.SetBuffer(kernel, "TriTable", SharedTriangleTable);
+        marchingCubes.SetBuffer(kernel, "CellTable", SharedCellBuffer);
+        marchingCubes.SetBuffer(kernel, "IndexOutBuffer", SharedIndexBuffer);
+        marchingCubes.SetTexture(kernel, "IndexInMapX", SharedVertexIndexMapX);
+        marchingCubes.SetTexture(kernel, "IndexInMapY", SharedVertexIndexMapY);
+        marchingCubes.SetTexture(kernel, "IndexInMapZ", SharedVertexIndexMapZ);
+        marchingCubes.DispatchIndirect(kernel, SharedJobSizeBuffer);
+
+
+        var numT = resolver.GetNow(SharedIndexBuffer);
+        Debug.Log($"Emitted triangle indexes: {numT}");
+
+        var idxReq = AsyncGPUReadback.Request(SharedIndexBuffer, 4 * 3 * Math.Min(10,numT*3), 0);
+        idxReq.WaitForCompletion();
+        outIndexData = idxReq.GetData<int>().ToArray();
 
         if (slicePrefab is not null)
         {
-            for (int i = 0; i < Sector.SizeInVoxels; i++)
+            for (int i = 0; i < Sector.OutputSizeInVoxels; i++)
             {
                 var slice = Instantiate(slicePrefab, transform);
                 slice.transform.localScale = new Vector3(10, 10, 10);
-                slice.transform.localPosition = new Vector3(0, 0, (float)i / Sector.SizeInVoxels * 10);
+                slice.transform.localPosition = new Vector3(0, 0, (float)i / Sector.OutputSizeInVoxels * 10);
                 var mesh = slice.GetComponentInChildren<MeshRenderer>();
                 if (mesh is not null)
                 {
-                    mesh.material.SetFloat("_Slice", (float)i / Sector.SizeInVoxels);
-                    mesh.material.SetFloat("_SizeInVoxels", Sector.SizeInVoxels);
-                    mesh.material.SetTexture("_MainTex", sector.DensityMaterialMap);
+                    mesh.material.SetFloat("_Slice", (float)i / Sector.OutputSizeInVoxels);
+                    mesh.material.SetFloat("_SizeInVoxels", Sector.OutputSizeInVoxels);
+#if !LOW_RESOLUTION
+                    mesh.material.SetTexture("_MainTex", SharedUpscaledDensityMap);
+#else
+                    mesh.material.SetTexture("_MainTex", sector.DensityMap);
+
+#endif
                 }
 
 

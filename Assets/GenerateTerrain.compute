@@ -3,12 +3,17 @@
 
 // Create a RenderTexture with enableRandomWrite flag and set it
 // with cs.SetTexture
-RWTexture3D<float2> Volume;
+RWTexture3D<float> DensityVolume;
+RWTexture3D<float> MaterialVolume;
 //AppendStructuredBuffer<uint3> TestBuffer;
 
 float3 Origin;
 float VoxelSize;
 int SizeInVoxels;
+
+#include "SimplexNoise.compute"
+
+
 
 [numthreads(8, 8, 8)]
 void Main (uint3 id : SV_DispatchThreadID)
@@ -16,7 +21,9 @@ void Main (uint3 id : SV_DispatchThreadID)
     float3 center = (float3)(0.5);
     float3 fx = ((float3)id+0.5) / SizeInVoxels;
     float d = distance(center,fx);
-
-    Volume[id] = float2(0.9-d,0);
+    d += SimplexNoise(id * -0.124) * 0.1;
+    DensityVolume[id] = (float) (id.z + 1) / (SizeInVoxels);
+    //0.9 - d;
+    MaterialVolume[id] = 0;
    // TestBuffer.Append(id);
 }

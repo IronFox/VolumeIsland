@@ -1,0 +1,72 @@
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel Upscale
+
+// Create a RenderTexture with enableRandomWrite flag and set it
+// with cs.SetTexture
+RWTexture2D<float4> Result;
+
+
+Texture3D<float2> Volume;
+RWTexture3D<float> OutputDensity;
+
+float3 Origin;
+
+int InputVoxelResolution;
+int OutputVoxelResolution;
+int InputOutputMultiplier;
+
+groupshared float loaded[5][5][5];
+
+
+
+
+
+#include "SimplexNoise.compute"
+
+
+
+
+
+float StackNoise(float3 p, float strength)
+{
+    float v = 0;
+    for (uint i = 0; i < 3; i++)
+    {
+        
+        v += SimplexNoise(p) * strength;
+        p *= 3;
+        strength /= 3;
+    }
+    return v;
+}
+
+
+
+
+[numthreads(8,8,8)]
+void Upscale(uint3 id : SV_DispatchThreadID, uint3 localId : SV_GroupThreadID)
+{
+    uint actualResolution = 8u / InputOutputMultiplier + 1u;
+    uint3 offset = id - localId;
+    if (all(localId < actualResolution))
+        loaded[localId.x][localId.y][localId.z] = Volume[offset / InputOutputMultiplier + localId].x;
+    
+    AllMemoryBarrierWithGroupSync();
+        
+    uint3 i = localId / InputOutputMultiplier;
+    uint3 r = localId % InputOutputMultiplier;
+    float3 f = ((float3) r) / InputOutputMultiplier;
+    float x0 = lerp(loaded[i.x][i.y][i.z], loaded[i.x + 1][i.y][i.z],f.x);
+    float x1 = lerp(loaded[i.x][i.y+1][i.z], loaded[i.x + 1][i.y+1][i.z],f.x);
+    float x2 = lerp(loaded[i.x][i.y+1][i.z+1], loaded[i.x + 1][i.y+1][i.z+1],f.x);
+    float x3 = lerp(loaded[i.x][i.y][i.z+1], loaded[i.x + 1][i.y][i.z+1],f.x);
+    
+    float y0 = lerp(x0, x1, f.y);
+    float y1 = lerp(x3, x2, f.y);
+    
+    float z = lerp(y0, y1, f.z);
+    
+    OutputDensity[id] = z - abs(StackNoise(0.013456 * 2 * id, 0.03));
+    //loaded[i.x][i.y][i.z];
+    
+}

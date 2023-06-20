@@ -61,6 +61,8 @@ Shader "Custom/SliceShader"
 
             d = tex3D(_MainTex, c );
 
+            //clip(0.502 - d);
+    
             o.Albedo = d < 0.502 ? 1 : 0;
             // Metallic and smoothness come from slider variables
             o.Metallic = _Metallic;

@@ -246,14 +246,13 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: ccb724adf34169e4fb39f55da5d3a929, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  shader: {fileID: 0}
   generateTerrain: {fileID: 7200000, guid: e486c40b2379d57458afd30fcf105e5a, type: 3}
+  upscaleTerrain: {fileID: 7200000, guid: badd872ee1563d945ac9222cb673ea7d, type: 3}
   emitVertexes: {fileID: 7200000, guid: 8a9842d46a00da74b8eb3ba94c9b256a, type: 3}
+  marchingCubes: {fileID: 7200000, guid: 559347f3818a27d439f4e6d7b9d9c151, type: 3}
   outTarget: {fileID: 0}
-  countResult: []
   slicePrefab: {fileID: 8004923655706609058, guid: d1f9a9481093c37478ea1792b88da049, type: 3}
-  instances: []
-  debugCount: 0
+  outVertexData: []
 --- !u!4 &898478695
 Transform:
   m_ObjectHideFlags: 0
