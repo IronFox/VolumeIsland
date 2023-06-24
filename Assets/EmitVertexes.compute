@@ -8,7 +8,7 @@ struct Vertex
     float3 normal;
 };
 RWStructuredBuffer<Vertex> VertexOut;
-AppendStructuredBuffer<uint4> CellOut;
+AppendStructuredBuffer<uint> CellOut;
 Texture3D<float2> Volume;
 float3 Origin;
 float VoxelSize;
@@ -16,9 +16,9 @@ uint SizeInVoxels;
 RWTexture3D<uint> IndexOutMapX;
 RWTexture3D<uint> IndexOutMapY;
 RWTexture3D<uint> IndexOutMapZ;
-AppendStructuredBuffer<uint4> DebugIndexOutX;
-AppendStructuredBuffer<uint4> DebugIndexOutY;
-AppendStructuredBuffer<uint4> DebugIndexOutZ;
+//AppendStructuredBuffer<uint4> DebugIndexOutX;
+//AppendStructuredBuffer<uint4> DebugIndexOutY;
+//AppendStructuredBuffer<uint4> DebugIndexOutZ;
 
 //shared float sharedDensity[THREADS_PER_GROUP_X + 2][THREADS_PER_GROUP_Y + 2];
 
@@ -125,7 +125,9 @@ void EmitVertex(uint3 id : SV_DispatchThreadID, uint3 localId : SV_GroupThreadID
         if (value7 < iso)
             cubeindex |= 64;
 
-        CellOut.Append(uint4(id, cubeindex));
+        uint4 u4 = uint4(id, cubeindex);
+            
+        CellOut.Append((u4.x) | (u4.y << 8) | (u4.z << 16) | (u4.w << 24));
     }
 
     float3 neighbors = float3(dx, dy, dz);
@@ -153,7 +155,7 @@ void EmitVertex(uint3 id : SV_DispatchThreadID, uint3 localId : SV_GroupThreadID
         v.position.x += VoxelSize * x.x;
         v.normal = normalize(-delta);
         VertexOut[i] = v;
-        DebugIndexOutX.Append(int4(id, i));
+        //DebugIndexOutX.Append(int4(id, i));
     }
     else
         IndexOutMapX[id] = 0xffffffff;
@@ -168,7 +170,7 @@ void EmitVertex(uint3 id : SV_DispatchThreadID, uint3 localId : SV_GroupThreadID
         v.position.y += VoxelSize * x.y;
         v.normal = normalize(-delta);
         VertexOut[i] = v;
-        DebugIndexOutY.Append(int4(id, i));
+        //DebugIndexOutY.Append(int4(id, i));
     }
     else
         IndexOutMapY[id] = 0xffffffff;
@@ -181,7 +183,7 @@ void EmitVertex(uint3 id : SV_DispatchThreadID, uint3 localId : SV_GroupThreadID
         v.position.z += VoxelSize * x.z;
         v.normal = normalize(-delta);
         VertexOut[i] = v;
-        DebugIndexOutZ.Append(int4(id,i));
+        //DebugIndexOutZ.Append(int4(id,i));
     }
     else
         IndexOutMapZ[id] = 0xffffffff;

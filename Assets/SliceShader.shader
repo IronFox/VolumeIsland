@@ -75,7 +75,9 @@ Shader "Custom/SliceShader"
             o.Normal = normalize(d - float3(dx,dy,dz));
             o.Normal.z = -o.Normal.z;
             
+#ifdef SHADER_API_D3D11
             clip(d - 0.5);
+#endif
             //o.Alpha = 0.5;
         }
         ENDCG

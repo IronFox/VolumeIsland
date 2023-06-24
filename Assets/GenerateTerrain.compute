@@ -22,8 +22,8 @@ void Main (uint3 id : SV_DispatchThreadID)
     float3 fx = ((float3)id+0.5) / SizeInVoxels;
     float d = distance(center,fx);
     d += SimplexNoise(id * -0.124) * 0.1;
-    DensityVolume[id] = (float) (id.z + 1) / (SizeInVoxels);
-    //0.9 - d;
+    //DensityVolume[id] = (float) (id.z + 1) / (SizeInVoxels);
+    DensityVolume[id] = 0.9 - d;
     MaterialVolume[id] = 0;
    // TestBuffer.Append(id);
 }
