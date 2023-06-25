@@ -66,7 +66,7 @@ void Upscale(uint3 id : SV_DispatchThreadID, uint3 localId : SV_GroupThreadID)
     
     float z = lerp(y0, y1, f.z);
     
-    OutputDensity[id] = z-abs(StackNoise(0.013456 * 2 * id, 0.03));
+    OutputDensity[id] = z -abs(StackNoise(0.013456 /8/15 * (id * OutputVoxelResolution + Origin), 0.03));
     //loaded[i.x][i.y][i.z];
     
 }

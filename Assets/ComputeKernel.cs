@@ -14,266 +14,40 @@ using Unity.Collections;
 using Unity.VisualScripting;
 using UnityEngine;
 using UnityEngine.Rendering;
+using static ComputeKernel;
 using static IslandMain;
+using static Sector;
+using static UnityEngine.GraphicsBuffer;
 using Debug = UnityEngine.Debug;
 
-public class ComputeKernel : IDisposable
+
+public record BakeJob(OvenSlot OvenSlot, Task<int> VertexCount, Task<int> TriangleCount, Sector Sector)
 {
-    /// <summary>
-    /// 4 bytes large: contains number of cells to be dispatched indirectly
-    /// </summary>
-    public ComputeBuffer SharedJobSizeBuffer { get; }
-    /// <summary>
-    /// Huge: vertex out append buffer
-    /// </summary>
-    public ComputeBuffer SharedVertexBuffer { get; }
-    /// <summary>
-    /// Huge: index out append buffer
-    /// </summary>
-    public ComputeBuffer SharedIndexBuffer { get; }
-    /// <summary>
-    /// Huge: cells determined by vertex emitter to have some trianlges in them
-    /// XYZ = cell coordinates, W = triangle batch index derived from corners
-    /// </summary>
-    public ComputeBuffer SharedCellBuffer { get; }
-    /// <summary>
-    /// Huge: map of all edge vertexes generated along X axis
-    /// </summary>
-    public RenderTexture SharedVertexIndexMapX { get; }
-    /// <summary>
-    /// Huge: map of all edge vertexes generated along Y axis
-    /// </summary>
-    public RenderTexture SharedVertexIndexMapY { get; }
-    /// <summary>
-    /// Huge: map of all edge vertexes generated along Z axis
-    /// </summary>
-    public RenderTexture SharedVertexIndexMapZ { get; }
 
-#if !LOW_RESOLUTION
-    public RenderTexture SharedUpscaledDensityMap { get;  }
-#endif
-
-
-    public void Dispose()
-    {
-        SharedJobSizeBuffer.Dispose();
-        SharedVertexBuffer.Dispose();
-        SharedIndexBuffer.Dispose();
-        UnityEngine.Object.Destroy(SharedVertexIndexMapX);
-        UnityEngine.Object.Destroy(SharedVertexIndexMapY);
-        UnityEngine.Object.Destroy(SharedVertexIndexMapZ);
-        #if !LOW_RESOLUTION
-            UnityEngine.Object.Destroy(SharedUpscaledDensityMap);
-        #endif
-    }
-
-    public ComputeKernel(
-        ComputeShader? generateTerrain,
-        ComputeShader? emitVertexes,
-        ComputeShader? marchingCubes,
-        ComputeShader? compact,
-        ComputeShader? upscaleTerrain
-
-
-        )
-    {
-        if (generateTerrain is null)
-            throw new ArgumentNullException(nameof(generateTerrain));
-        if (emitVertexes is null)
-            throw new ArgumentNullException(nameof(emitVertexes));
-        if (marchingCubes is null)
-            throw new ArgumentNullException(nameof(marchingCubes));
-        if (compact is null)
-            throw new ArgumentNullException(nameof(compact));
-        if (upscaleTerrain is null)
-            throw new ArgumentNullException(nameof(upscaleTerrain));
-        GenerateTerrainShader = generateTerrain;
-        EmitVertexes = emitVertexes;
-        MarchingCubes = marchingCubes;
-        Compact = compact;
-        UpscaleTerrain = upscaleTerrain;
-
-        GenerateTerrainKernel = GenerateTerrainShader.FindKernel("Main");
-        EmitVertexesKernel = EmitVertexes.FindKernel("EmitVertex");
-        EmitTrianglesKernel = MarchingCubes.FindKernel("EmitTriangles");
-        UpscaleTerrainKernel = UpscaleTerrain.FindKernel("Upscale");
-
-        CopyVertexKernel = Compact.FindKernel("CopyVertex");
-        CopyIndexKernel = Compact.FindKernel("CopyIndex");
-
-        SharedUpscaledDensityMap = ComputeOperator.MakeVolume(Sector.OutputSizeInVoxels, RenderTextureFormat.R16);
-
-        SharedJobSizeBuffer = new(3, 4, ComputeBufferType.IndirectArguments);
-        SharedJobSizeBuffer.SetData(new int[] { 1, 1, 1 });
-
-        SharedVertexIndexMapX = ComputeOperator.MakeVolume(Sector.OutputSizeInVoxels, RenderTextureFormat.RInt);
-        SharedVertexIndexMapY = ComputeOperator.MakeVolume(Sector.OutputSizeInVoxels, RenderTextureFormat.RInt);
-        SharedVertexIndexMapZ = ComputeOperator.MakeVolume(Sector.OutputSizeInVoxels, RenderTextureFormat.RInt);
-
-
-        SharedIndexBuffer = new(Sector.TotalOutputVoxelCount * 5, 12, ComputeBufferType.Append);
-        SharedVertexBuffer = new(Sector.TotalOutputVoxelCount * 3, VertexLayout.SizeBytes, ComputeBufferType.Counter);
-        Debug.Log($"Vertex buffer accomodates {SharedVertexBuffer.count} vertexes in {SharedVertexBuffer.count * SharedVertexBuffer.stride} bytes");
-        SharedVertexBuffer.SetCounterValue(0);
-
-        if (Sector.OutputSizeInVoxels > 256)
-            throw new InvalidOperationException("Bad voxel volume for 8bit indexes");
-        SharedCellBuffer = new(Sector.TotalOutputVoxelCount, 4, ComputeBufferType.Append); //x,y,z,i = 4*(byte)
-    }
-
-
-    public ComputeShader GenerateTerrainShader { get; }
-    public ComputeShader EmitVertexes { get; }
-    public ComputeShader MarchingCubes { get; }
-    public ComputeShader Compact { get; }
-    public ComputeShader UpscaleTerrain { get; }
-
-
-    public int GenerateTerrainKernel { get; }
-    public int EmitVertexesKernel { get; }
-    public int EmitTrianglesKernel { get; }
-    public int CopyVertexKernel { get; }
-    public int CopyIndexKernel { get; }
-    public int UpscaleTerrainKernel { get; }
-
-
-
-    private static void Dispatch(ComputeShader shader, int kernel, int resolution)
-    {
-        int x = (resolution + Sector.KernelSize - 1) / Sector.KernelSize;
-        shader.Dispatch(kernel, x, x, x);
-
-    }
-
-    public interface IDebugOut
-    {
-        void Log(string msg);
-        void DrawPoint(float x, float y, float z, Color c);
-        void DrawLine(Vector3 p0, Vector3 p1, Color c);
-        void DrawBox(Vector3 lower, Vector3 upper, Color c);
-
-    }
-
-    private static string Ar<T>(IEnumerable<T> array) => "[" + string.Join(",", array) + "]";
-    private static string Ar(IEnumerable<float> floatArray) => "[" + string.Join(",", floatArray.Select(vi => vi.ToString(CultureInfo.InvariantCulture))) + "]";
-    private static string Ar(IEnumerable<double> doubleArray) => "[" + string.Join(",", doubleArray.Select(vi => vi.ToString(CultureInfo.InvariantCulture))) + "]";
-
-    private static Vector3 V(float x) => new(x, x, x);
-    private static Vector3 V(float x, float y, float z) => new(x, y, z);
-    private static Vector3 V(float[] v, int offset)
+    public async Task BakeAsync(Stopwatch watch, IDebugOut? debugOut)
     {
         try
         {
-            return offset >= 0 && offset+2 < v.Length ? new(v[offset], v[offset + 1], v[offset + 2]) : throw new InvalidOperationException("Unable to access vertex offset " + offset + ". Float count is " + v.Length);
-        }
-        catch (Exception ex)
-        {
-            throw new InvalidOperationException("Unable to access vertex offset " + offset + ". Float count is " + v.Length,ex);
-        }
-    }
-
-    public void GenerateTerrain(Sector sector)
-    {
-        GenerateTerrainShader.SetTexture(GenerateTerrainKernel, "DensityVolume", sector.DensityMap);
-        GenerateTerrainShader.SetTexture(GenerateTerrainKernel, "MaterialVolume", sector.MaterialMap);
-        GenerateTerrainShader.SetVector("Origin", sector.Origin);
-        GenerateTerrainShader.SetFloat("VoxelSize", Sector.InputVoxelSize);
-        GenerateTerrainShader.SetInt("SizeInVoxels", Sector.InputSizeInVoxels);
-
-        Dispatch(GenerateTerrainShader, GenerateTerrainKernel, Sector.InputSizeInVoxels);
-
-    }
-
-
-    public void Profile(string name, Action act)
-    {
-        var watch = Stopwatch.StartNew();
-
-        act();
-
-        watch.Stop();
-        var elapsed = watch.Elapsed;
-        Debug.Log($"{name}: {elapsed}");
-
-    }
-    public async Task Profile(string name, Func<Task> act)
-    {
-        var watch = Stopwatch.StartNew();
-
-        await act();
-
-        watch.Stop();
-        var elapsed = watch.Elapsed;
-        Debug.Log($"{name}: {elapsed}");
-    }
-
-    public async Task CompileAsync(Sector sector, IDebugOut? debugOut = null)
-    {
-        try
-        {
-            Profile("Upscale", () =>
-            {
-
-
-                UpscaleTerrain.SetTexture(UpscaleTerrainKernel, "Volume", sector.DensityMap);
-                UpscaleTerrain.SetVector("Origin", sector.Origin);
-                UpscaleTerrain.SetInt("InputVoxelResolution", Sector.InputSizeInVoxels);
-                UpscaleTerrain.SetInt("OutputVoxelResolution", Sector.OutputSizeInVoxels);
-                UpscaleTerrain.SetInt("InputOutputMultiplier", Sector.OutputMultiplier);
-                UpscaleTerrain.SetTexture(UpscaleTerrainKernel, "OutputDensity", SharedUpscaledDensityMap);
-
-                Dispatch(UpscaleTerrain, UpscaleTerrainKernel, Sector.OutputSizeInVoxels);
-            });
-
-
-            Profile("EmitVertexes", () =>
-            {
-                SharedVertexBuffer.SetCounterValue(0);
-                SharedCellBuffer.SetCounterValue(0);
-#if !LOW_RESOLUTION
-                EmitVertexes.SetTexture(EmitVertexesKernel, "Volume", SharedUpscaledDensityMap);
-#else
-            EmitVertexes.SetTexture(EmitVertexesKernel, "Volume", sector.DensityMap);
-#endif
-                EmitVertexes.SetVector("Origin", sector.Origin);
-                EmitVertexes.SetFloat("VoxelSize", Sector.OutputVoxelSize);
-                EmitVertexes.SetInt("SizeInVoxels", Sector.OutputSizeInVoxels);
-                EmitVertexes.SetBuffer(EmitVertexesKernel, "VertexOut", SharedVertexBuffer);
-                EmitVertexes.SetBuffer(EmitVertexesKernel, "CellOut", SharedCellBuffer);
-                EmitVertexes.SetTexture(EmitVertexesKernel, "IndexOutMapX", SharedVertexIndexMapX);
-                EmitVertexes.SetTexture(EmitVertexesKernel, "IndexOutMapY", SharedVertexIndexMapY);
-                EmitVertexes.SetTexture(EmitVertexesKernel, "IndexOutMapZ", SharedVertexIndexMapZ);
-                //EmitVertexes.SetBuffer(kernel, "DebugIndexOutX", DebugIndexOutX);
-                //EmitVertexes.SetBuffer(kernel, "DebugIndexOutY", DebugIndexOutY);
-                //EmitVertexes.SetBuffer(kernel, "DebugIndexOutZ", DebugIndexOutZ);
-
-                Dispatch(EmitVertexes, EmitVertexesKernel, Sector.OutputSizeInVoxels);
-            });
-
-            var vertexCount = ComputeOperator.GetCountAsync(SharedVertexBuffer);
-
 
             float[]? outVertexData = null;
             int[]? outIndexData = null;
-
-
             if (debugOut is not null)
             {
 
-                var vcnt = await vertexCount;
-                debugOut.Log("Emitted vertexes: " + vcnt + "/" + SharedVertexBuffer.count);
+                var vcnt = await VertexCount;
+                debugOut.Log("Emitted vertexes: " + vcnt + "/" + OvenSlot.SharedVertexBuffer.count);
 
-                debugOut.Log("Emitted cells: " + (await ComputeOperator.GetCountAsync(SharedCellBuffer)) + "/" + SharedCellBuffer.count);
-                var cells = (await ComputeOperator.GetAllAsync<byte>(SharedCellBuffer, 1, 4, 0)).ToArray();
-                debugOut.Log($"First Cell: {string.Join(", ", cells)}");
-                debugOut.Log($"Bits: {((int)cells[3]).ToBinaryString()}");
+                //debugOut.Log("Emitted cells: " + (await ComputeOperator.GetCountAsync(SharedCellBuffer)) + "/" + SharedCellBuffer.count);
+                //var cells = (await ComputeOperator.GetAllAsync<byte>(SharedCellBuffer, 1, 4, 0)).ToArray();
+                //debugOut.Log($"First Cell: {string.Join(", ", cells)}");
+                //debugOut.Log($"Bits: {((int)cells[3]).ToBinaryString()}");
 
                 if (vcnt < 1000)
                 {
                     var requestBytes = VertexLayout.SizeBytes * vcnt;
                     debugOut.Log("Requesting " + requestBytes + " bytes");
 
-                    outVertexData = (await ComputeOperator.GetAllAsync<float>(SharedVertexBuffer, VertexLayout.SizeBytes, vcnt, 0)).ToArray();
+                    outVertexData = (await ComputeOperator.GetAllAsync<float>(OvenSlot.SharedVertexBuffer, VertexLayout.SizeBytes, vcnt, 0)).ToArray();
                     debugOut.Log($"Got {outVertexData.Length} floats from VRAM");
                 }
 
@@ -300,16 +74,16 @@ public class ComputeKernel : IDisposable
                             for (int k = 0; k < Sector.OutputSizeInVoxels; k++)
                             {
                                 debugOut.DrawLine(
-                                    sector.Origin + new Vector3(i, j, 0) * Sector.OutputVoxelSize,
-                                    sector.Origin + new Vector3(i, j, Sector.CoreSizeInInputVoxels) * Sector.OutputVoxelSize,
+                                    Sector.Origin + new Vector3(i, j, 0) * Sector.OutputVoxelSize,
+                                    Sector.Origin + new Vector3(i, j, Sector.CoreSizeInInputVoxels) * Sector.OutputVoxelSize,
                                     Color.gray);
                                 debugOut.DrawLine(
-                                    sector.Origin + new Vector3(i, 0, j) * Sector.OutputVoxelSize,
-                                    sector.Origin + new Vector3(i, Sector.CoreSizeInInputVoxels, j) * Sector.OutputVoxelSize,
+                                    Sector.Origin + new Vector3(i, 0, j) * Sector.OutputVoxelSize,
+                                    Sector.Origin + new Vector3(i, Sector.CoreSizeInInputVoxels, j) * Sector.OutputVoxelSize,
                                     Color.gray);
                                 debugOut.DrawLine(
-                                    sector.Origin + new Vector3(0, i, j) * Sector.OutputVoxelSize,
-                                    sector.Origin + new Vector3(Sector.CoreSizeInInputVoxels, i, j) * Sector.OutputVoxelSize,
+                                    Sector.Origin + new Vector3(0, i, j) * Sector.OutputVoxelSize,
+                                    Sector.Origin + new Vector3(Sector.CoreSizeInInputVoxels, i, j) * Sector.OutputVoxelSize,
                                     Color.gray);
                             }
                 }
@@ -324,38 +98,17 @@ public class ComputeKernel : IDisposable
                     }
             }
 
-            await Profile("EmitTriangles", async () =>
-            {
 
-                ComputeBuffer.CopyCount(SharedCellBuffer, SharedJobSizeBuffer, 0);
-
-                if (debugOut is not null)
-                {
-                    var cnt = (await ComputeOperator.GetAllAsync<int>(SharedJobSizeBuffer, 4, 3, 0));
-                    debugOut.Log($"Size: {cnt[0]},{cnt[1]},{cnt[2]}");
-                }
-
-                SharedIndexBuffer.SetCounterValue(0);
-                MarchingCubes.SetBuffer(EmitTrianglesKernel, "CellTable", SharedCellBuffer);
-                MarchingCubes.SetBuffer(EmitTrianglesKernel, "IndexOutBuffer", SharedIndexBuffer);
-
-                MarchingCubes.SetTexture(EmitTrianglesKernel, "IndexInMapX", SharedVertexIndexMapX);
-                MarchingCubes.SetTexture(EmitTrianglesKernel, "IndexInMapY", SharedVertexIndexMapY);
-                MarchingCubes.SetTexture(EmitTrianglesKernel, "IndexInMapZ", SharedVertexIndexMapZ);
-                MarchingCubes.DispatchIndirect(EmitTrianglesKernel, SharedJobSizeBuffer);
-            });
-
-            var numTriangles = ComputeOperator.GetCountAsync(SharedIndexBuffer);
             if (debugOut is not null)
             {
 
-                var lNumT = await numTriangles;
+                var lNumT = await TriangleCount;
                 debugOut.Log($"Emitted index triples: {lNumT}");
 
 
                 if (outVertexData is not null)
                 {
-                    outIndexData = ComputeOperator.GetAllNow<int>(SharedIndexBuffer, 4, lNumT * 3, 0);
+                    outIndexData = ComputeOperator.GetAllNow<int>(OvenSlot.SharedIndexBuffer, 4, lNumT * 3, 0);
                     debugOut.Log($"Indexes: {Ar(outIndexData)}");
                     int failCount = 0;
                     for (int i = 0; i < lNumT; i++)
@@ -368,9 +121,9 @@ public class ComputeKernel : IDisposable
 
                             try
                             {
-                                var v0 = V(outVertexData, o0 * VertexLayout.SizeFloats);
-                                var v1 = V(outVertexData, o1 * VertexLayout.SizeFloats);
-                                var v2 = V(outVertexData, o2 * VertexLayout.SizeFloats);
+                                var v0 = ComputeKernel.V(outVertexData, o0 * VertexLayout.SizeFloats);
+                                var v1 = ComputeKernel.V(outVertexData, o1 * VertexLayout.SizeFloats);
+                                var v2 = ComputeKernel.V(outVertexData, o2 * VertexLayout.SizeFloats);
 
                                 var c = new Color(0, 0, 1, 0.5f);
                                 debugOut.DrawLine(v0, v1, c);
@@ -400,13 +153,16 @@ public class ComputeKernel : IDisposable
 
             }
 
-            int numT=0;
+            int numT = 0;
             int numV = 0;
 
-            await Profile("Fetch", async () =>
+            await Profile("Fetch 1", async () =>
             {
-                numT = await numTriangles;
-                numV = await vertexCount;
+                numV = await VertexCount;
+            });
+            await Profile("Fetch 2", async () =>
+            {
+                numT = await TriangleCount;
             });
 
 
@@ -418,13 +174,13 @@ public class ComputeKernel : IDisposable
                     GraphicsBuffer vertexes = new(GraphicsBuffer.Target.Vertex | GraphicsBuffer.Target.Structured | GraphicsBuffer.Target.Raw, numV, VertexLayout.SizeBytes);
                     GraphicsBuffer indexes = new(GraphicsBuffer.Target.Index | GraphicsBuffer.Target.Raw, numT * 3, 4);
 
-                    Compact.SetBuffer(CopyIndexKernel, "IndexSource", SharedIndexBuffer);
-                    Compact.SetBuffer(CopyIndexKernel, "IndexDestination", indexes);
-                    ComputeOperator.DispatchOversized(Compact, CopyIndexKernel, numT);
+                    OvenSlot.Compact.SetBuffer(OvenSlot.CopyIndexKernel, "IndexSource", OvenSlot.SharedIndexBuffer);
+                    OvenSlot.Compact.SetBuffer(OvenSlot.CopyIndexKernel, "IndexDestination", indexes);
+                    ComputeOperator.DispatchOversized(OvenSlot.Compact, OvenSlot.CopyIndexKernel, numT);
 
-                    Compact.SetBuffer(CopyVertexKernel, "VertexSource", SharedVertexBuffer);
-                    Compact.SetBuffer(CopyVertexKernel, "VertexDestination", vertexes);
-                    ComputeOperator.DispatchOversized(Compact, CopyVertexKernel, numV);
+                    OvenSlot.Compact.SetBuffer(OvenSlot.CopyVertexKernel, "VertexSource", OvenSlot.SharedVertexBuffer);
+                    OvenSlot.Compact.SetBuffer(OvenSlot.CopyVertexKernel, "VertexDestination", vertexes);
+                    ComputeOperator.DispatchOversized(OvenSlot.Compact, OvenSlot.CopyVertexKernel, numV);
 
 
                     if (debugOut is not null && outVertexData is not null)
@@ -508,15 +264,299 @@ public class ComputeKernel : IDisposable
 
                     Sector.Compacted baked = new(vertexes, indexes, numV, numT);
 
-                    await sector.ReplaceCompactAsync(baked);
+                    await Sector.ReplaceCompactAsync(baked);
+
+                    Debug.Log($"Sector {Sector.Origin} compiled in {watch.Elapsed}");
                 }
                 else
-                    await sector.ReplaceCompactAsync(null);
+                {
+                    Debug.Log($"Sector {Sector.Origin} compiled (no triangles) in {watch.Elapsed}");
+                    await Sector.ReplaceCompactAsync(null);
+                }
             });
         }
         catch (Exception ex)
         {
             Debug.LogException(ex);
         }
+    }
+}
+
+public class OvenSlot : IDisposable
+{
+    /// <summary>
+    /// Huge: vertex out append buffer
+    /// </summary>
+    public ComputeBuffer SharedVertexBuffer { get; }
+    /// <summary>
+    /// Huge: index out append buffer
+    /// </summary>
+    public ComputeBuffer SharedIndexBuffer { get; }
+
+    public ComputeShader Compact { get; }
+
+    public int CopyVertexKernel { get; }
+    public int CopyIndexKernel { get; }
+
+    public void Dispose()
+    {
+        SharedVertexBuffer.Dispose();
+        SharedIndexBuffer.Dispose();
+    }
+
+    public OvenSlot(ComputeShader? compact)
+    {
+        if (compact is null)
+            throw new ArgumentNullException(nameof(compact));
+        Compact = compact;
+        CopyVertexKernel = Compact.FindKernel("CopyVertex");
+        CopyIndexKernel = Compact.FindKernel("CopyIndex");
+
+        SharedIndexBuffer = new(Sector.TotalOutputVoxelCount * 5, 12, ComputeBufferType.Append);
+        SharedVertexBuffer = new(Sector.TotalOutputVoxelCount * 3, VertexLayout.SizeBytes, ComputeBufferType.Counter);
+        Debug.Log($"Vertex buffer accomodates {SharedVertexBuffer.count} vertexes in {SharedVertexBuffer.count * SharedVertexBuffer.stride} bytes");
+    }
+
+
+
+
+
+}
+
+public class ComputeKernel : IDisposable
+{
+    /// <summary>
+    /// 4 bytes large: contains number of cells to be dispatched indirectly
+    /// </summary>
+    public ComputeBuffer SharedJobSizeBuffer { get; }
+    /// <summary>
+    /// Huge: cells determined by vertex emitter to have some trianlges in them
+    /// XYZ = cell coordinates, W = triangle batch index derived from corners
+    /// </summary>
+    public ComputeBuffer SharedCellBuffer { get; }
+    /// <summary>
+    /// Huge: map of all edge vertexes generated along X axis
+    /// </summary>
+    public RenderTexture SharedVertexIndexMapX { get; }
+    /// <summary>
+    /// Huge: map of all edge vertexes generated along Y axis
+    /// </summary>
+    public RenderTexture SharedVertexIndexMapY { get; }
+    /// <summary>
+    /// Huge: map of all edge vertexes generated along Z axis
+    /// </summary>
+    public RenderTexture SharedVertexIndexMapZ { get; }
+
+#if !LOW_RESOLUTION
+    public RenderTexture SharedUpscaledDensityMap { get;  }
+#endif
+
+
+    public void Dispose()
+    {
+        SharedJobSizeBuffer.Dispose();
+        UnityEngine.Object.Destroy(SharedVertexIndexMapX);
+        UnityEngine.Object.Destroy(SharedVertexIndexMapY);
+        UnityEngine.Object.Destroy(SharedVertexIndexMapZ);
+        #if !LOW_RESOLUTION
+            UnityEngine.Object.Destroy(SharedUpscaledDensityMap);
+        #endif
+    }
+
+    public ComputeKernel(
+        ComputeShader? generateTerrain,
+        ComputeShader? emitVertexes,
+        ComputeShader? marchingCubes,
+        ComputeShader? upscaleTerrain
+        )
+    {
+        if (generateTerrain is null)
+            throw new ArgumentNullException(nameof(generateTerrain));
+        if (emitVertexes is null)
+            throw new ArgumentNullException(nameof(emitVertexes));
+        if (marchingCubes is null)
+            throw new ArgumentNullException(nameof(marchingCubes));
+        if (upscaleTerrain is null)
+            throw new ArgumentNullException(nameof(upscaleTerrain));
+        GenerateTerrainShader = generateTerrain;
+        EmitVertexes = emitVertexes;
+        MarchingCubes = marchingCubes;
+        UpscaleTerrain = upscaleTerrain;
+
+        GenerateTerrainKernel = GenerateTerrainShader.FindKernel("Main");
+        EmitVertexesKernel = EmitVertexes.FindKernel("EmitVertex");
+        EmitTrianglesKernel = MarchingCubes.FindKernel("EmitTriangles");
+        UpscaleTerrainKernel = UpscaleTerrain.FindKernel("Upscale");
+
+
+        SharedUpscaledDensityMap = ComputeOperator.MakeVolume(Sector.OutputSizeInVoxels, RenderTextureFormat.R16);
+
+        SharedJobSizeBuffer = new(3, 4, ComputeBufferType.IndirectArguments);
+        SharedJobSizeBuffer.SetData(new int[] { 1, 1, 1 });
+
+        SharedVertexIndexMapX = ComputeOperator.MakeVolume(Sector.OutputSizeInVoxels, RenderTextureFormat.RInt);
+        SharedVertexIndexMapY = ComputeOperator.MakeVolume(Sector.OutputSizeInVoxels, RenderTextureFormat.RInt);
+        SharedVertexIndexMapZ = ComputeOperator.MakeVolume(Sector.OutputSizeInVoxels, RenderTextureFormat.RInt);
+
+
+
+        if (Sector.OutputSizeInVoxels > 256)
+            throw new InvalidOperationException("Bad voxel volume for 8bit indexes");
+        SharedCellBuffer = new(Sector.TotalOutputVoxelCount, 4, ComputeBufferType.Append); //x,y,z,i = 4*(byte)
+    }
+
+
+    public ComputeShader GenerateTerrainShader { get; }
+    public ComputeShader EmitVertexes { get; }
+    public ComputeShader MarchingCubes { get; }
+    public ComputeShader UpscaleTerrain { get; }
+
+
+    public int GenerateTerrainKernel { get; }
+    public int EmitVertexesKernel { get; }
+    public int EmitTrianglesKernel { get; }
+    public int UpscaleTerrainKernel { get; }
+
+
+
+    private static void Dispatch(ComputeShader shader, int kernel, int resolution)
+    {
+        int x = (resolution + Sector.KernelSize - 1) / Sector.KernelSize;
+        shader.Dispatch(kernel, x, x, x);
+
+    }
+
+    public interface IDebugOut
+    {
+        void Log(string msg);
+        void DrawPoint(float x, float y, float z, Color c);
+        void DrawLine(Vector3 p0, Vector3 p1, Color c);
+        void DrawBox(Vector3 lower, Vector3 upper, Color c);
+
+    }
+
+    public static string Ar<T>(IEnumerable<T> array) => "[" + string.Join(",", array) + "]";
+    public static string Ar(IEnumerable<float> floatArray) => "[" + string.Join(",", floatArray.Select(vi => vi.ToString(CultureInfo.InvariantCulture))) + "]";
+    public static string Ar(IEnumerable<double> doubleArray) => "[" + string.Join(",", doubleArray.Select(vi => vi.ToString(CultureInfo.InvariantCulture))) + "]";
+
+    public static Vector3 V(float x) => new(x, x, x);
+    public static Vector3 V(float x, float y, float z) => new(x, y, z);
+    public static Vector3 V(float[] v, int offset)
+    {
+        try
+        {
+            return offset >= 0 && offset+2 < v.Length ? new(v[offset], v[offset + 1], v[offset + 2]) : throw new InvalidOperationException("Unable to access vertex offset " + offset + ". Float count is " + v.Length);
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException("Unable to access vertex offset " + offset + ". Float count is " + v.Length,ex);
+        }
+    }
+
+    public void GenerateTerrain(Sector sector)
+    {
+        GenerateTerrainShader.SetTexture(GenerateTerrainKernel, "DensityVolume", sector.DensityMap);
+        GenerateTerrainShader.SetTexture(GenerateTerrainKernel, "MaterialVolume", sector.MaterialMap);
+        GenerateTerrainShader.SetVector("Origin", sector.Origin);
+        GenerateTerrainShader.SetFloat("VoxelSize", Sector.InputVoxelSize);
+        GenerateTerrainShader.SetInt("SizeInVoxels", Sector.InputSizeInVoxels);
+
+        Dispatch(GenerateTerrainShader, GenerateTerrainKernel, Sector.InputSizeInVoxels);
+
+    }
+
+
+    public static void Profile(string name, Action act)
+    {
+        var watch = Stopwatch.StartNew();
+
+        act();
+
+        watch.Stop();
+        var elapsed = watch.Elapsed;
+        Debug.Log($"{name}: {elapsed}");
+
+    }
+    public static async Task Profile(string name, Func<Task> act)
+    {
+        var watch = Stopwatch.StartNew();
+
+        await act();
+
+        watch.Stop();
+        var elapsed = watch.Elapsed;
+        Debug.Log($"{name}: {elapsed}");
+    }
+
+    public BakeJob Compile(Sector sector, OvenSlot target)
+    {
+        Profile("Upscale", () =>
+        {
+
+
+            UpscaleTerrain.SetTexture(UpscaleTerrainKernel, "Volume", sector.DensityMap);
+            UpscaleTerrain.SetVector("Origin", sector.Origin);
+            UpscaleTerrain.SetInt("InputVoxelResolution", Sector.InputSizeInVoxels);
+            UpscaleTerrain.SetInt("OutputVoxelResolution", Sector.OutputSizeInVoxels);
+            UpscaleTerrain.SetInt("InputOutputMultiplier", Sector.OutputMultiplier);
+            UpscaleTerrain.SetTexture(UpscaleTerrainKernel, "OutputDensity", SharedUpscaledDensityMap);
+
+            Dispatch(UpscaleTerrain, UpscaleTerrainKernel, Sector.OutputSizeInVoxels);
+        });
+
+
+        Profile("EmitVertexes", () =>
+        {
+            target.SharedVertexBuffer.SetCounterValue(0);
+            SharedCellBuffer.SetCounterValue(0);
+#if !LOW_RESOLUTION
+            EmitVertexes.SetTexture(EmitVertexesKernel, "Volume", SharedUpscaledDensityMap);
+#else
+        EmitVertexes.SetTexture(EmitVertexesKernel, "Volume", sector.DensityMap);
+#endif
+            EmitVertexes.SetVector("Origin", sector.Origin);
+            EmitVertexes.SetFloat("VoxelSize", Sector.OutputVoxelSize);
+            EmitVertexes.SetInt("SizeInVoxels", Sector.OutputSizeInVoxels);
+            EmitVertexes.SetBuffer(EmitVertexesKernel, "VertexOut", target.SharedVertexBuffer);
+            EmitVertexes.SetBuffer(EmitVertexesKernel, "CellOut", SharedCellBuffer);
+            EmitVertexes.SetTexture(EmitVertexesKernel, "IndexOutMapX", SharedVertexIndexMapX);
+            EmitVertexes.SetTexture(EmitVertexesKernel, "IndexOutMapY", SharedVertexIndexMapY);
+            EmitVertexes.SetTexture(EmitVertexesKernel, "IndexOutMapZ", SharedVertexIndexMapZ);
+            //EmitVertexes.SetBuffer(kernel, "DebugIndexOutX", DebugIndexOutX);
+            //EmitVertexes.SetBuffer(kernel, "DebugIndexOutY", DebugIndexOutY);
+            //EmitVertexes.SetBuffer(kernel, "DebugIndexOutZ", DebugIndexOutZ);
+
+            Dispatch(EmitVertexes, EmitVertexesKernel, Sector.OutputSizeInVoxels);
+        });
+
+        var vertexCount = ComputeOperator.GetCountAsync(target.SharedVertexBuffer);
+
+
+
+
+        Profile("EmitTriangles", () =>
+        {
+
+            ComputeBuffer.CopyCount(SharedCellBuffer, SharedJobSizeBuffer, 0);
+
+            //if (debugOut is not null)
+            //{
+            //    var cnt = (await ComputeOperator.GetAllAsync<int>(SharedJobSizeBuffer, 4, 3, 0));
+            //    debugOut.Log($"Size: {cnt[0]},{cnt[1]},{cnt[2]}");
+            //}
+
+            target.SharedIndexBuffer.SetCounterValue(0);
+            MarchingCubes.SetBuffer(EmitTrianglesKernel, "CellTable", SharedCellBuffer);
+            MarchingCubes.SetBuffer(EmitTrianglesKernel, "IndexOutBuffer", target.SharedIndexBuffer);
+
+            MarchingCubes.SetTexture(EmitTrianglesKernel, "IndexInMapX", SharedVertexIndexMapX);
+            MarchingCubes.SetTexture(EmitTrianglesKernel, "IndexInMapY", SharedVertexIndexMapY);
+            MarchingCubes.SetTexture(EmitTrianglesKernel, "IndexInMapZ", SharedVertexIndexMapZ);
+            MarchingCubes.DispatchIndirect(EmitTrianglesKernel, SharedJobSizeBuffer);
+        });
+
+        var triangleCount = ComputeOperator.GetCountAsync(target.SharedIndexBuffer);
+
+            return new (target, vertexCount, triangleCount, sector);
     }
 }

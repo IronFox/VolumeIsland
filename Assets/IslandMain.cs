@@ -5,6 +5,7 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Drawing;
 using System.Linq;
 using System.Threading.Tasks;
@@ -13,6 +14,7 @@ using Unity.VisualScripting;
 using UnityEngine;
 using UnityEngine.Rendering;
 using Color = UnityEngine.Color;
+using Debug = UnityEngine.Debug;
 
 #nullable enable
 
@@ -54,7 +56,10 @@ public class IslandMain : MonoBehaviour, ComputeKernel.IDebugOut
     void OnDestroy()
     {
         kernel?.Dispose();
-        sector?.Dispose();
+        sector0?.Dispose();
+        sector1?.Dispose();
+        ovenSlot0?.Dispose();
+        ovenSlot1?.Dispose();
     }
 
 
@@ -79,25 +84,38 @@ public class IslandMain : MonoBehaviour, ComputeKernel.IDebugOut
 
     
 
-    Sector? sector;
+    Sector? sector0;
+    Sector? sector1;
     ComputeKernel? kernel;
-
+    OvenSlot? ovenSlot0;
+    OvenSlot? ovenSlot1;
 
     // Start is called before the first frame update
     void Start()
     {
-        sector = new Sector(Vector3.zero);
+        var watch = Stopwatch.StartNew();
+
+        sector0 = new Sector(Vector3.zero);
+        sector1 = new Sector(new Vector3(Sector.InputSectorSize,0,0));
+
+        ovenSlot0 = new OvenSlot(compact: compact);
+        ovenSlot1 = new OvenSlot(compact: compact);
+
         kernel = new ComputeKernel(
             generateTerrain: generateTerrain, 
             emitVertexes: emitVertexes, 
             marchingCubes: marchingCubes, 
-            compact: compact, 
             upscaleTerrain: upscaleTerrain
             );
 
-        kernel.GenerateTerrain(sector);
+        kernel.GenerateTerrain(sector0);
+        kernel.GenerateTerrain(sector1);
 
-        _ = kernel.CompileAsync(sector, debugOut:null);
+        var job0 = kernel.Compile(sector0, ovenSlot0);
+        var job1 = kernel.Compile(sector1, ovenSlot1);
+
+        _ = job0.BakeAsync(watch, debugOut: null);
+        _ = job1.BakeAsync(watch, debugOut: null);
 
 
         //var idxReq = AsyncGPUReadback.Request(SharedIndexBuffer, 4 * 3 * Math.Min(10,numT*3), 0);
@@ -133,7 +151,8 @@ public class IslandMain : MonoBehaviour, ComputeKernel.IDebugOut
     // Update is called once per frame
     void Update()
     {
-        sector?.Render(material ?? throw new ArgumentNullException(nameof(material)));
+        sector0?.Render(material ?? throw new ArgumentNullException(nameof(material)));
+        sector1?.Render(material ?? throw new ArgumentNullException(nameof(material)));
 
         //if (target is null)
         //{

@@ -21,7 +21,7 @@ void Main (uint3 id : SV_DispatchThreadID)
     float3 center = (float3)(0.5);
     float3 fx = ((float3) id + 0.5) / (SizeInVoxels - 1);
     float d = distance(center,fx);
-    d += SimplexNoise(id * -0.124) * 0.1;
+    d += SimplexNoise((id * VoxelSize + Origin) * 0.25) * 0.1;
     DensityVolume[id] = 0.9 - d;
     MaterialVolume[id] = 0;
 }
