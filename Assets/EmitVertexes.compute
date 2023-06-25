@@ -28,50 +28,33 @@ AppendStructuredBuffer<float> DebugOut;
 
 static const float iso = 0.5;
 
-groupshared float loaded[9][9][9];
+groupshared float loaded[11][11][11];
+
+#define OFF 1
+#define UE1 9
+#define UE2 10
+#define LE1 0
+
+float v(int3 coord)
+{
+    return Volume[clamp(coord, 0, SizeInVoxels - 1)];
+    //return 0;
+}
 
 [numthreads(8,8,8)]
 void EmitVertex(uint3 id : SV_DispatchThreadID, uint3 localId : SV_GroupThreadID)
 {
-    //id = 7,6,15
-    //localId = 7,6,7
-    //bad (local) = 8,7,8
-    if (all(id < SizeInVoxels)) //true
+    //if (all(id < SizeInVoxels))
     {
-        loaded[localId.x][localId.y][localId.z] = Volume[id];
-        if (localId.x == 7) //true
-        {
-            loaded[8][localId.y][localId.z] = Volume[id + uint3(1, 0, 0)];
         
-            if (localId.y == 7)//false (1) / true (2)
-            {
-                loaded[8][8][localId.z] = Volume[id + uint3(1, 1, 0)];
+        uint3 loadedId = localId * 11 / 8;
+        uint3 endId = (localId + 1) * 11 / 8;
+        
+        for (uint x = loadedId.x; x < endId.x; x++)
+            for (uint y = loadedId.y; y < endId.y; y++)
+                for (uint z = loadedId.z; z < endId.z; z++)
+                    loaded[x][y][z] = v((id - localId) - OFF + int3(x, y, z));
 
-                if (localId.z == 7)
-                {
-                    loaded[8][8][8] = Volume[id + uint3(1, 1, 1)];
-                    loaded[8][localId.y][8] = Volume[id + uint3(1, 0, 1)];
-                }
-            }
-            else if (localId.z == 7)    //true
-            {
-                loaded[8][localId.y][8] = Volume[id + uint3(1, 0, 1)];
-            }
-        }
-        if (localId.y == 7)//false (1) / true (2)
-        {
-            loaded[localId.x][8][localId.z] = Volume[id + uint3(0, 1, 0)];
-
-            if (localId.z == 7)
-            {
-                loaded[localId.x][8][8] = Volume[id + uint3(0, 1, 1)];
-                loaded[localId.x][localId.y][8] = Volume[id + uint3(0, 0, 1)];
-            }
-        }
-        if (localId.z == 7)//true
-        {
-            loaded[localId.x][localId.y][8] = Volume[id + uint3(0, 0, 1)];
-        }
     }
     
     AllMemoryBarrierWithGroupSync();
@@ -86,19 +69,25 @@ void EmitVertex(uint3 id : SV_DispatchThreadID, uint3 localId : SV_GroupThreadID
     //if (any(id + 1 == SizeInVoxels))
     //    return;
 
-    uint3 outer = localId + 1;
+    uint3 v0 = localId + OFF;
+    uint3 v_1 = v0 - 1;
+    uint3 v1 = v0 + 1;
+    uint3 v2 = v1 + 1;
 
 
 
-    float d = loaded[localId.x][localId.y][localId.z];
-    float dx = loaded[outer.x][localId.y][localId.z];   // <- 1
-    float dy = loaded[localId.x][outer.y][localId.z];   // <- 2
-    float dz = loaded[localId.x][localId.y][outer.z];
+    float d = loaded[v0.x][v0.y][v0.z];
+    float dx = loaded[v1.x][v0.y][v0.z];
+    float dy = loaded[v0.x][v1.y][v0.z];
+    float dz = loaded[v0.x][v0.y][v1.z];
+    float dnx = loaded[v_1.x][v0.y][v0.z];
+    float dny = loaded[v0.x][v_1.y][v0.z];
+    float dnz = loaded[v0.x][v0.y][v_1.z];
     
-    float dxy = loaded[outer.x][outer.y][localId.z];
-    float dyz = loaded[localId.x][outer.y][outer.z];
-    float dxz = loaded[outer.x][localId.y][outer.z];
-    float dxyz = loaded[outer.x][outer.y][outer.z];
+    float dxy = loaded[v1.x][v1.y][v0.z];
+    float dyz = loaded[v0.x][v1.y][v1.z];
+    float dxz = loaded[v1.x][v0.y][v1.z];
+    float dxyz = loaded[v1.x][v1.y][v1.z];
 
     bool4 d0 = float4(d, dx, dy, dz) >= iso;
     bool4 d1 = float4(dxy, dyz, dxz, dxyz) >= iso;
@@ -146,10 +135,14 @@ void EmitVertex(uint3 id : SV_DispatchThreadID, uint3 localId : SV_GroupThreadID
     }
 
     float3 neighbors = float3(dx, dy, dz);
+    
     float3 delta = neighbors - d;
+    float3 delta2 = neighbors - float3(dnx, dny, dnz);
+    
     float3 x = (iso - d) / delta;
     bool3 edge = x >= 0 && x < 1;
     float3 p0 = Origin + VoxelSize * id;
+    
 
     //if (any(edge))
     //{
@@ -168,7 +161,17 @@ void EmitVertex(uint3 id : SV_DispatchThreadID, uint3 localId : SV_GroupThreadID
         Vertex v;
         v.position = p0;
         v.position.x += VoxelSize * x.x;
-        v.normal = normalize(-delta);
+        
+        float3 n0 = delta2;
+        float3 n1 = 
+        
+        float3(
+            loaded[v2.x][v0.y][v0.z] - loaded[v0.x][v0.y][v0.z],
+            loaded[v1.x][v1.y][v0.z] - loaded[v1.x][v_1.y][v0.z],
+            loaded[v1.x][v0.y][v1.z] - loaded[v1.x][v0.y][v_1.z]
+        );
+        
+        v.normal = normalize(-lerp(n0, n1, x.x));
         VertexOut[i] = v;
         //DebugIndexOutX.Append(int4(id, i));
     }
@@ -183,7 +186,17 @@ void EmitVertex(uint3 id : SV_DispatchThreadID, uint3 localId : SV_GroupThreadID
         Vertex v;
         v.position = p0;
         v.position.y += VoxelSize * x.y;
-        v.normal = normalize(-delta);
+        
+        float3 n0 = delta2;
+        float3 n1 = 
+        float3(
+            loaded[v1.x][v1.y][v0.z] - loaded[v_1.x][v1.y][v0.z],
+            loaded[v0.x][v2.y][v0.z] - loaded[v0.x][v0.y][v0.z],
+            loaded[v0.x][v1.y][v1.z] - loaded[v0.x][v1.y][v_1.z]
+        );
+        
+        
+        v.normal = normalize(-lerp(n0, n1, x.y));
         VertexOut[i] = v;
         //DebugIndexOutY.Append(int4(id, i));
     }
@@ -196,7 +209,18 @@ void EmitVertex(uint3 id : SV_DispatchThreadID, uint3 localId : SV_GroupThreadID
         Vertex v;
         v.position = p0;
         v.position.z += VoxelSize * x.z;
-        v.normal = normalize(-delta);
+        
+        float3 n0 = delta2;
+        float3 n1 =
+        
+        float3(
+            loaded[v1.x][v0.y][v1.z] - loaded[v_1.x][v0.y][v1.z],
+            loaded[v0.x][v1.y][v1.z] - loaded[v0.x][v_1.y][v1.z],
+            loaded[v0.x][v0.y][v2.z] - loaded[v0.x][v0.y][v0.z]
+        );
+        
+        
+        v.normal = normalize(-lerp(n0, n1, x.z));
         VertexOut[i] = v;
         //DebugIndexOutZ.Append(int4(id,i));
     }
