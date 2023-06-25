@@ -1,4 +1,4 @@
-#define LOW_RESOLUTION
+//#define LOW_RESOLUTION
 
 #nullable enable
 
@@ -18,13 +18,13 @@ public class Sector : IDisposable
 {
 
 
-    #if LOW_RESOLUTION
+#if LOW_RESOLUTION
         public const int CoreSizeInInputVoxels = 5; //number of voxels along every edge of the persisted grid. 
         public const int InputSizeInVoxels = 5; //need one more to interpolate output properly
         public const int OutputSizeInVoxels = 5;
         public const float InputVoxelSize = 2f;   //25cm per input voxel
         public const float OutputVoxelSize = 2f;   //25cm per input voxel
-    #else
+#else
 
         public const int CoreSizeInInputVoxels = 32; //number of voxels along every edge of the persisted grid. 
         public const int InputSizeInVoxels = CoreSizeInInputVoxels + 1; //need one more to interpolate output properly
@@ -88,7 +88,7 @@ public class Sector : IDisposable
             RenderParams rp = new RenderParams(material);
             rp.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.On;
             rp.receiveShadows = true;
-            rp.worldBounds = new Bounds(parent.Origin, parent.Origin + V(Sector.OutputVoxelSize * Sector.OutputSizeInVoxels)); // use tighter bounds
+            rp.worldBounds = new Bounds(parent.Origin, parent.Origin + V(Sector.OutputVoxelSize * Sector.OutputSizeInVoxels)*2); // use tighter bounds
             rp.matProps = new MaterialPropertyBlock();
             rp.matProps.SetBuffer("_Positions", VertexBuffer);
             //rp.matProps.SetMatrix("_ObjectToWorld", Matrix4x4.Translate(parent.Origin));
@@ -104,8 +104,8 @@ public class Sector : IDisposable
     
     public async Task ReplaceCompactAsync(Compacted? replacement)
     {
-        if (replacement is null || replacement.RefCount != 1)
-            throw new ArgumentException("RefCount expected to be 1 at this point");
+        if (replacement is not null && replacement.RefCount != 1)
+                throw new ArgumentException("RefCount expected to be 1 at this point");
         Compacted? old;
         await ReplaceLock.WaitAsync();
         try

@@ -1,6 +1,6 @@
 //#define VERTEX_ONLY
 
-#define LOW_RESOLUTION
+//#define LOW_RESOLUTION
 
 using System;
 using System.Collections;
@@ -67,7 +67,6 @@ public class IslandMain : MonoBehaviour, ComputeKernel.IDebugOut
     {
         Debug.DrawLine(v0, v1, c, 1e20f);
     }
-
     private static void DebugDrawPoint(float x, float y, float z, Color c, float size = 0.1f)
     {
         DebugDraw(new(x - size, y, z), new(x + size, y, z), c);
@@ -88,7 +87,13 @@ public class IslandMain : MonoBehaviour, ComputeKernel.IDebugOut
     void Start()
     {
         sector = new Sector(Vector3.zero);
-        kernel = new ComputeKernel(generateTerrain: generateTerrain, emitVertexes: emitVertexes, marchingCubes: marchingCubes, compact: compact);
+        kernel = new ComputeKernel(
+            generateTerrain: generateTerrain, 
+            emitVertexes: emitVertexes, 
+            marchingCubes: marchingCubes, 
+            compact: compact, 
+            upscaleTerrain: upscaleTerrain
+            );
 
         kernel.GenerateTerrain(sector);
 
@@ -99,29 +104,29 @@ public class IslandMain : MonoBehaviour, ComputeKernel.IDebugOut
         //idxReq.WaitForCompletion();
         //outIndexData = idxReq.GetData<int>().ToArray();
 
-        if (slicePrefab is not null)
-        {
-            for (int i = 0; i < Sector.OutputSizeInVoxels; i++)
-            {
-                var slice = Instantiate(slicePrefab, transform);
-                slice.transform.localScale = new Vector3(10, 10, 10);
-                slice.transform.localPosition = new Vector3(0, 0, (float)i / (Sector.OutputSizeInVoxels-1) * 10);
-                var mesh = slice.GetComponentInChildren<MeshRenderer>();
-                if (mesh is not null)
-                {
-                    mesh.material.SetFloat("_Slice", (float)i / (Sector.OutputSizeInVoxels-1));
-                    mesh.material.SetFloat("_SizeInVoxels", Sector.OutputSizeInVoxels);
-#if !LOW_RESOLUTION
-                    mesh.material.SetTexture("_MainTex", SharedUpscaledDensityMap);
-#else
-                    mesh.material.SetTexture("_MainTex", sector.DensityMap);
+//        if (slicePrefab is not null)
+//        {
+//            for (int i = 0; i < Sector.OutputSizeInVoxels; i++)
+//            {
+//                var slice = Instantiate(slicePrefab, transform);
+//                slice.transform.localScale = new Vector3(10, 10, 10);
+//                slice.transform.localPosition = new Vector3(0, 0, (float)i / (Sector.OutputSizeInVoxels-1) * 10);
+//                var mesh = slice.GetComponentInChildren<MeshRenderer>();
+//                if (mesh is not null)
+//                {
+//                    mesh.material.SetFloat("_Slice", (float)i / (Sector.OutputSizeInVoxels-1));
+//                    mesh.material.SetFloat("_SizeInVoxels", Sector.OutputSizeInVoxels);
+//#if !LOW_RESOLUTION
+//                    mesh.material.SetTexture("_MainTex", SharedUpscaledDensityMap);
+//#else
+//                    mesh.material.SetTexture("_MainTex", sector.DensityMap);
 
-#endif
-                }
+//#endif
+//                }
 
 
-            }
-        }
+//            }
+//        }
 
     }
 
@@ -193,5 +198,21 @@ public class IslandMain : MonoBehaviour, ComputeKernel.IDebugOut
     public void DrawLine(Vector3 p0, Vector3 p1, Color c)
     {
         DebugDraw(p0, p1, c);
+    }
+    public void DrawBox(Vector3 p0, Vector3 p1, Color c)
+    {
+        DebugDraw(p0, new (p1.x,p0.y,p0.z), c);
+        DebugDraw(p0, new (p0.x,p1.y,p0.z), c);
+        DebugDraw(p0, new (p0.x,p0.y,p1.z), c);
+        DebugDraw(new (p0.x,p1.y,p1.z), p1, c);
+        DebugDraw(new (p1.x,p0.y,p1.z), p1, c);
+        DebugDraw(new (p1.x,p1.y,p0.z), p1, c);
+
+        DebugDraw(new (p1.x,p1.y,p0.z), new(p1.x, p0.y, p0.z), c);
+        DebugDraw(new (p1.x,p1.y,p0.z), new(p0.x, p1.y, p0.z), c);
+        DebugDraw(new (p1.x,p0.y,p1.z), new(p1.x, p0.y, p0.z), c);
+        DebugDraw(new (p1.x,p0.y,p1.z), new(p0.x, p0.y, p1.z), c);
+        DebugDraw(new (p0.x,p1.y,p1.z), new(p0.x, p1.y, p0.z), c);
+        DebugDraw(new (p0.x,p1.y,p1.z), new(p0.x, p0.y, p1.z), c);
     }
 }

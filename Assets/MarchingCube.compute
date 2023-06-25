@@ -10,7 +10,6 @@ AppendStructuredBuffer<uint3> IndexOutBuffer;
 
 
 
-
 static const int TriTable[] = {
 -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
 0, 8, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
@@ -327,6 +326,7 @@ void EmitTriangles (uint3 id : SV_DispatchThreadID)
     {
         bool brk = false;
         uint tr[3];
+        uint s[3];
         //uint3 tr = (uint3) 0xffffffff;
         for (int j = 0; j < 3; j++)
         {
@@ -337,6 +337,7 @@ void EmitTriangles (uint3 id : SV_DispatchThreadID)
                 brk = true;
                 break;
             }
+            s[j] = idt;
             tr[j] = idx[idt];
            // tr[j] = idt;
         //IndexOutBuffer.Append(idt);
@@ -345,6 +346,13 @@ void EmitTriangles (uint3 id : SV_DispatchThreadID)
             break;
         cnt++;
         IndexOutBuffer.Append(uint3(tr[0], tr[1], tr[2]));
+        
+        //if (tr[0] == 0xFFFFFFFF || tr[1] == 0xFFFFFFFF || tr[2] == 0xFFFFFFFF)
+        //    ErrorCellOutBuffer.Append(uint4(cellU,
+        //        tr[0] != 0xFFFFFFFF ? -1 : s[0], 
+        //        tr[1] != 0xFFFFFFFF ? -1 : s[1],
+        //        tr[2] != 0xFFFFFFFF ? -1 : s[2]));
+
     }
     //IndexOutBuffer.Append(10000+cnt);
 

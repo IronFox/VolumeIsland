@@ -6,7 +6,7 @@
 RWTexture2D<float4> Result;
 
 
-Texture3D<float2> Volume;
+Texture3D<float> Volume;
 RWTexture3D<float> OutputDensity;
 
 float3 Origin;
@@ -15,7 +15,7 @@ int InputVoxelResolution;
 int OutputVoxelResolution;
 int InputOutputMultiplier;
 
-groupshared float loaded[5][5][5];
+groupshared float loaded[9][9][9];
 
 
 
@@ -49,7 +49,7 @@ void Upscale(uint3 id : SV_DispatchThreadID, uint3 localId : SV_GroupThreadID)
     uint actualResolution = 8u / InputOutputMultiplier + 1u;
     uint3 offset = id - localId;
     if (all(localId < actualResolution))
-        loaded[localId.x][localId.y][localId.z] = Volume[offset / InputOutputMultiplier + localId].x;
+        loaded[localId.x][localId.y][localId.z] = Volume[offset / InputOutputMultiplier + localId];
     
     AllMemoryBarrierWithGroupSync();
         
@@ -66,7 +66,7 @@ void Upscale(uint3 id : SV_DispatchThreadID, uint3 localId : SV_GroupThreadID)
     
     float z = lerp(y0, y1, f.z);
     
-    OutputDensity[id] = z - abs(StackNoise(0.013456 * 2 * id, 0.03));
+    OutputDensity[id] = z-abs(StackNoise(0.013456 * 2 * id, 0.03));
     //loaded[i.x][i.y][i.z];
     
 }

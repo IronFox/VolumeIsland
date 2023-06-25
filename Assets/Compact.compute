@@ -28,7 +28,12 @@ void CopyVertex (uint3 id : SV_DispatchThreadID)
 void CopyIndex (uint3 id : SV_DispatchThreadID)
 {
     uint3 tri = IndexSource[id.x];
-    IndexDestination[id.x * 3] = tri.x;
-    IndexDestination[id.x * 3 + 1] = tri.y;
-    IndexDestination[id.x * 3 + 2] = tri.z;
+    if (tri.x == -1 || tri.y == -1 || tri.z == -1)
+        IndexDestination[id.x * 3] = IndexDestination[id.x * 3 + 1] = IndexDestination[id.x * 3 + 2] = 0;
+    else
+    {
+        IndexDestination[id.x * 3] = tri.x;
+        IndexDestination[id.x * 3 + 1] = tri.y;
+        IndexDestination[id.x * 3 + 2] = tri.z;
+    }
 }

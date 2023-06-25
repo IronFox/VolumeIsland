@@ -9,14 +9,17 @@ struct Vertex
 };
 RWStructuredBuffer<Vertex> VertexOut;
 AppendStructuredBuffer<uint> CellOut;
-Texture3D<float2> Volume;
+Texture3D<float> Volume;
 float3 Origin;
 float VoxelSize;
 uint SizeInVoxels;
 RWTexture3D<uint> IndexOutMapX;
 RWTexture3D<uint> IndexOutMapY;
 RWTexture3D<uint> IndexOutMapZ;
-//AppendStructuredBuffer<uint4> DebugIndexOutX;
+
+
+AppendStructuredBuffer<float> DebugOut;
+
 //AppendStructuredBuffer<uint4> DebugIndexOutY;
 //AppendStructuredBuffer<uint4> DebugIndexOutZ;
 
@@ -30,35 +33,44 @@ groupshared float loaded[9][9][9];
 [numthreads(8,8,8)]
 void EmitVertex(uint3 id : SV_DispatchThreadID, uint3 localId : SV_GroupThreadID)
 {
-    if (all(id < SizeInVoxels))
+    //id = 7,6,15
+    //localId = 7,6,7
+    //bad (local) = 8,7,8
+    if (all(id < SizeInVoxels)) //true
     {
-        loaded[localId.x][localId.y][localId.z] = Volume[id].x;
-        if (localId.x == 7)
+        loaded[localId.x][localId.y][localId.z] = Volume[id];
+        if (localId.x == 7) //true
         {
-            loaded[8][localId.y][localId.z] = Volume[id + uint3(1, 0, 0)].x;
+            loaded[8][localId.y][localId.z] = Volume[id + uint3(1, 0, 0)];
         
-            if (localId.y == 7)
+            if (localId.y == 7)//false (1) / true (2)
             {
-                loaded[8][8][localId.z] = Volume[id + uint3(1, 1, 0)].x;
+                loaded[8][8][localId.z] = Volume[id + uint3(1, 1, 0)];
 
                 if (localId.z == 7)
                 {
-                    loaded[8][8][8] = Volume[id + uint3(1, 1, 1)].x;
+                    loaded[8][8][8] = Volume[id + uint3(1, 1, 1)];
+                    loaded[8][localId.y][8] = Volume[id + uint3(1, 0, 1)];
                 }
             }
+            else if (localId.z == 7)    //true
+            {
+                loaded[8][localId.y][8] = Volume[id + uint3(1, 0, 1)];
+            }
         }
-        if (localId.y == 7)
+        if (localId.y == 7)//false (1) / true (2)
         {
-            loaded[localId.x][8][localId.z] = Volume[id + uint3(0, 1, 0)].x;
+            loaded[localId.x][8][localId.z] = Volume[id + uint3(0, 1, 0)];
 
             if (localId.z == 7)
             {
-                loaded[localId.x][8][8] = Volume[id + uint3(0, 1, 1)].x;
+                loaded[localId.x][8][8] = Volume[id + uint3(0, 1, 1)];
+                loaded[localId.x][localId.y][8] = Volume[id + uint3(0, 0, 1)];
             }
         }
-        if (localId.z == 7)
+        if (localId.z == 7)//true
         {
-            loaded[localId.x][localId.y][8] = Volume[id + uint3(0, 0, 1)].x;
+            loaded[localId.x][localId.y][8] = Volume[id + uint3(0, 0, 1)];
         }
     }
     
@@ -68,18 +80,19 @@ void EmitVertex(uint3 id : SV_DispatchThreadID, uint3 localId : SV_GroupThreadID
     if (any(id >= SizeInVoxels))
         return;
     
+
     
 
     //if (any(id + 1 == SizeInVoxels))
     //    return;
 
-    uint3 outer = min(localId + 1, SizeInVoxels - 1);
+    uint3 outer = localId + 1;
 
 
 
     float d = loaded[localId.x][localId.y][localId.z];
-    float dx = loaded[outer.x][localId.y][localId.z];
-    float dy = loaded[localId.x][outer.y][localId.z];
+    float dx = loaded[outer.x][localId.y][localId.z];   // <- 1
+    float dy = loaded[localId.x][outer.y][localId.z];   // <- 2
     float dz = loaded[localId.x][localId.y][outer.z];
     
     float dxy = loaded[outer.x][outer.y][localId.z];
@@ -89,6 +102,8 @@ void EmitVertex(uint3 id : SV_DispatchThreadID, uint3 localId : SV_GroupThreadID
 
     bool4 d0 = float4(d, dx, dy, dz) >= iso;
     bool4 d1 = float4(dxy, dyz, dxz, dxyz) >= iso;
+    
+    
 
     //bool debugEmit = all(id == uint3(0, 0, 0));
 
@@ -100,8 +115,8 @@ void EmitVertex(uint3 id : SV_DispatchThreadID, uint3 localId : SV_GroupThreadID
         if ((any(d0) || any(d1)) && !(all(d0) && all(d1)))
     {
         float value0 = d;
-        float value1 = dx; // px
-        float value2 = dy; // py
+        float value1 = dx; // px    <- 1
+        float value2 = dy; // py    <- 2
         float value3 = dxy; // pxy
         float value4 = dz; // pz
         float value5 = dxz; // pxz
@@ -109,21 +124,21 @@ void EmitVertex(uint3 id : SV_DispatchThreadID, uint3 localId : SV_GroupThreadID
         float value7 = dxyz; // pxyz
 
         if (value0 < iso)
-            cubeindex |= 1;
+            cubeindex |= 1<<0;
         if (value1 < iso)
-            cubeindex |= 2;
+            cubeindex |= 1<<1;//
         if (value2 < iso)
-            cubeindex |= 8;
+            cubeindex |= 1<<3;
         if (value3 < iso)
-            cubeindex |= 4;
+            cubeindex |= 1<<2;
         if (value4 < iso)
-            cubeindex |= 16;
+            cubeindex |= 1<<4;
         if (value5 < iso)
-            cubeindex |= 32;
+            cubeindex |= 1<<5;
         if (value6 < iso)
-            cubeindex |= 128;
+            cubeindex |= 1<<7;
         if (value7 < iso)
-            cubeindex |= 64;
+            cubeindex |= 1<<6;
 
         uint4 u4 = uint4(id, cubeindex);
             
