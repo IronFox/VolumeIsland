@@ -97,7 +97,7 @@ public class IslandMain : MonoBehaviour, ComputeKernel.IDebugOut
 
         kernel.GenerateTerrain(sector);
 
-        _ = kernel.CompileAsync(sector, this);
+        _ = kernel.CompileAsync(sector, debugOut:null);
 
 
         //var idxReq = AsyncGPUReadback.Request(SharedIndexBuffer, 4 * 3 * Math.Min(10,numT*3), 0);
